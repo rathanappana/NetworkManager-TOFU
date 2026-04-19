@@ -182,6 +182,7 @@ static const LogDesc domain_desc[] = {
     {LOGD_SYSTEMD, "SYSTEMD"},
     {LOGD_VPN_PLUGIN, "VPN_PLUGIN"},
     {LOGD_PROXY, "PROXY"},
+    {LOGD_TOFU, "TOFU"},
     {0},
 };
 
@@ -502,7 +503,7 @@ _domains_to_string(gboolean          include_level_override,
     return nm_str_buf_finalize(&sbuf, NULL);
 }
 
-static char _all_logging_domains_to_str[273];
+static char _all_logging_domains_to_str[278];
 
 const char *
 nm_logging_all_domains_to_string(void)
