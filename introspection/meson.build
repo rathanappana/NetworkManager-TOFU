@@ -4,6 +4,7 @@ ifaces = [
   'org.freedesktop.NetworkManager',
   'org.freedesktop.NetworkManager.AccessPoint',
   'org.freedesktop.NetworkManager.AgentManager',
+  'org.freedesktop.NetworkManager.CertificateAgent',
   'org.freedesktop.NetworkManager.Checkpoint',
   'org.freedesktop.NetworkManager.Connection.Active',
   'org.freedesktop.NetworkManager.DHCP4Config',
