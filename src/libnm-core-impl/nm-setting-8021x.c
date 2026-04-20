@@ -132,7 +132,8 @@ NM_GOBJECT_PROPERTIES_DEFINE(NMSetting8021x,
                              PROP_SYSTEM_CA_CERTS,
                              PROP_OPTIONAL,
                              PROP_AUTH_TIMEOUT,
-                             PROP_OPENSSL_CIPHERS, );
+                             PROP_OPENSSL_CIPHERS,
+                             PROP_CA_VERIFY_MODE, );
 
 typedef struct {
     GSList *eap; /* GSList of strings */
@@ -181,6 +182,7 @@ typedef struct {
     guint   phase2_private_key_password_flags;
     guint32 phase1_auth_flags;
     gint32  auth_timeout;
+    gint32  ca_verify_mode;
     bool    optional;
     bool    system_ca_certs;
 } NMSetting8021xPrivate;
@@ -2518,6 +2520,25 @@ nm_setting_802_1x_get_openssl_ciphers(NMSetting8021x *setting)
     return NM_SETTING_802_1X_GET_PRIVATE(setting)->openssl_ciphers;
 }
 
+/**
+ * nm_setting_802_1x_get_ca_verify_mode:
+ * @setting: the #NMSetting8021x
+ *
+ * Returns the CA certificate verification mode for the connection.
+ *
+ * Returns: the #NMSetting8021xCaVerifyMode value.
+ *
+ * Since: 1.58
+ **/
+NMSetting8021xCaVerifyMode
+nm_setting_802_1x_get_ca_verify_mode(NMSetting8021x *setting)
+{
+    g_return_val_if_fail(NM_IS_SETTING_802_1X(setting),
+                         NM_SETTING_802_1X_CA_VERIFY_MODE_DEFAULT);
+
+    return NM_SETTING_802_1X_GET_PRIVATE(setting)->ca_verify_mode;
+}
+
 /*****************************************************************************/
 
 static void
@@ -4298,6 +4319,36 @@ nm_setting_802_1x_class_init(NMSetting8021xClass *klass)
                                               NM_SETTING_PARAM_NONE,
                                               NMSetting8021xPrivate,
                                               openssl_ciphers);
+
+    /**
+     * NMSetting8021x:ca-verify-mode:
+     *
+     * Controls TLS server certificate verification when no CA certificate is
+     * configured. When set to %NM_SETTING_802_1X_CA_VERIFY_MODE_TOFU,
+     * NetworkManager uses Trust-On-First-Use: it prompts the user to accept
+     * the server certificate on the first connection and pins it for
+     * subsequent connections.
+     *
+     * Since: 1.58
+     **/
+    /* ---ifcfg-rh---
+     * property: ca-verify-mode
+     * variable: IEEE_8021X_CA_VERIFY_MODE(+)
+     * values: default, tofu
+     * default: default
+     * description: CA certificate verification mode for 802.1x connections.
+     * ---end---
+     */
+    _nm_setting_property_define_direct_enum(properties_override,
+                                            obj_properties,
+                                            NM_SETTING_802_1X_CA_VERIFY_MODE,
+                                            PROP_CA_VERIFY_MODE,
+                                            NM_TYPE_SETTING_802_1X_CA_VERIFY_MODE,
+                                            NM_SETTING_802_1X_CA_VERIFY_MODE_DEFAULT,
+                                            NM_SETTING_PARAM_NONE,
+                                            NULL,
+                                            NMSetting8021xPrivate,
+                                            ca_verify_mode);
 
     g_object_class_install_properties(object_class, _PROPERTY_ENUMS_LAST, obj_properties);
 
