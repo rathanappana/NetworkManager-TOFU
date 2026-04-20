@@ -2773,6 +2773,7 @@ test_types(void)
         G(nm_secret_agent_old_get_type),
         G(nm_setting_6lowpan_get_type),
         G(nm_setting_802_1x_auth_flags_get_type),
+        G(nm_setting_802_1x_ca_verify_mode_get_type),
         G(nm_setting_802_1x_ck_format_get_type),
         G(nm_setting_802_1x_ck_scheme_get_type),
         G(nm_setting_802_1x_get_type),
