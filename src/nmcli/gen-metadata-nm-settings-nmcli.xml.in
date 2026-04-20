@@ -201,6 +201,10 @@
         <property name="ca-path"
                   nmcli-description="UTF-8 encoded path to a directory containing PEM or DER formatted certificates to be added to the verification chain in addition to the certificate specified in the &quot;ca-cert&quot; property. If NMSetting8021x:system-ca-certs is enabled and the built-in CA path is an existing directory, then this setting is ignored."
                   format="string" />
+        <property name="ca-verify-mode"
+                  nmcli-description="Controls TLS server certificate verification when no CA certificate is configured. When set to &quot;tofu&quot; (1), NetworkManager uses Trust-On-First-Use: it prompts the user to accept the server certificate on first connection and pins it for subsequent connections. Default (0) preserves existing behavior."
+                  format="enum (NMSetting8021xCaVerifyMode)"
+                  values="default (0), tofu (1)" />
         <property name="subject-match"
                   nmcli-description="Substring to be matched against the subject of the certificate presented by the authentication server. When unset, no verification of the authentication server certificate&apos;s subject is performed. This property provides little security, if any, and should not be used."
                   format="string" />
