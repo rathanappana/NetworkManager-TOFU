@@ -1,0 +1,843 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
+/*
+ * Copyright (C) 2025 Red Hat, Inc.
+ */
+
+/*
+ * TOFU (Trust On First Use) core state machine.
+ *
+ * Stages:
+ *   1. Detection  - nm-device-wifi.c detects EAP connection with
+ *                   ca-verify-mode=tofu and no CA cert; calls
+ *                   nm_tofu_set_session() (wired in commit 9).
+ *   2. Collection - nm_tofu_stage2_cert_signal() accumulates certificates
+ *                   from wpa_supplicant's Certification D-Bus signal
+ *                   (wired in commit 8).
+ *   3. Dispatch   - On leaf cert (depth==0): verify against system CAs,
+ *                   parse cert fields, call registered CertificateAgent.
+ *   4. Response   - tofu_on_agent_response() handles accept/reject from
+ *                   the agent UI (connection management wired in commit 6).
+ */
+
+#include "src/core/nm-default-daemon.h"
+
+#include "nm-tofu.h"
+
+#include <gnutls/x509.h>
+#include <time.h>
+
+#include "nm-certificate-agent.h"
+#include "nm-dbus-manager.h"
+
+/*****************************************************************************/
+
+#define _NMLOG_DOMAIN LOGD_TOFU
+#define _NMLOG(level, ...) \
+    nm_log((level), (_NMLOG_DOMAIN), NULL, NULL, "tofu: " __VA_ARGS__)
+
+/* Trusted-cert keyfile store under NM's state directory. */
+#define TOFU_CERT_STORE NMSTATEDIR "/tofu-trusted-certs.keyfile"
+#define TOFU_CERT_DIR   NMSTATEDIR "/tofu"
+
+/*****************************************************************************/
+/* Session state (module-global; one NM process, one active session)          */
+
+static NMTOFUSessionType  s_session_type   = NM_TOFU_SESSION_TYPE_DEFAULT;
+static char              *s_ssid           = NULL;
+static char              *s_uuid           = NULL;
+static NMTOFUCertSession *s_observed_certs = NULL; /* certs from wpa_supplicant */
+static NMTOFUCertSession *s_config_cert    = NULL; /* CA cert from connection profile */
+
+/*****************************************************************************/
+/* NMTOFUCertInfo / NMTOFUCertSession lifetime                                */
+
+static void
+cert_info_free(NMTOFUCertInfo *info)
+{
+    if (!info)
+        return;
+    g_free(info->subject);
+    g_free(info->hash);
+    nm_clear_pointer(&info->cert_data, g_bytes_unref);
+    g_free(info);
+}
+
+static NMTOFUCertSession *
+cert_session_new(void)
+{
+    NMTOFUCertSession *s;
+
+    s        = g_new0(NMTOFUCertSession, 1);
+    s->certs = g_ptr_array_new_with_free_func((GDestroyNotify) cert_info_free);
+    return s;
+}
+
+static void
+cert_session_free(NMTOFUCertSession *s)
+{
+    if (!s)
+        return;
+    g_ptr_array_unref(s->certs);
+    g_free(s);
+}
+
+/*****************************************************************************/
+/* Session management                                                          */
+
+void
+nm_tofu_set_session(NMTOFUSessionType type, const char *ssid, const char *uuid)
+{
+    nm_tofu_reset_session();
+
+    s_session_type = type;
+    s_ssid         = g_strdup(ssid ?: "");
+    s_uuid         = g_strdup(uuid ?: "");
+
+    _NMLOG(LOGL_INFO, "session started: type=%d ssid=%s uuid=%s", (int) type, s_ssid, s_uuid);
+}
+
+NMTOFUSessionType
+nm_tofu_get_session_type(void)
+{
+    return s_session_type;
+}
+
+const char *
+nm_tofu_get_ssid(void)
+{
+    return s_ssid;
+}
+
+const char *
+nm_tofu_get_uuid(void)
+{
+    return s_uuid;
+}
+
+void
+nm_tofu_reset_session(void)
+{
+    if (s_session_type == NM_TOFU_SESSION_TYPE_DEFAULT && !s_observed_certs)
+        return;
+
+    nm_clear_pointer(&s_observed_certs, cert_session_free);
+    nm_clear_pointer(&s_config_cert, cert_session_free);
+    nm_clear_g_free(&s_ssid);
+    nm_clear_g_free(&s_uuid);
+    s_session_type = NM_TOFU_SESSION_TYPE_DEFAULT;
+
+    _NMLOG(LOGL_DEBUG, "session reset");
+}
+
+/*****************************************************************************/
+/* Trusted-cert keyfile store                                                  */
+
+gboolean
+nm_tofu_mark_server_cert_as_trusted(const char *uuid, const char *cert_hash)
+{
+    nm_auto_unref_keyfile GKeyFile *kf    = NULL;
+    gs_free_error GError           *error = NULL;
+    gs_free char                   *data  = NULL;
+    gsize                           length;
+
+    g_return_val_if_fail(uuid && *uuid, FALSE);
+    g_return_val_if_fail(cert_hash && *cert_hash, FALSE);
+
+    kf = g_key_file_new();
+
+    if (g_file_test(TOFU_CERT_STORE, G_FILE_TEST_EXISTS)) {
+        if (!g_key_file_load_from_file(kf, TOFU_CERT_STORE, G_KEY_FILE_NONE, &error)) {
+            _NMLOG(LOGL_WARN, "cannot load cert store: %s", error->message);
+            return FALSE;
+        }
+    }
+
+    g_key_file_set_string(kf, uuid, "cert_hash", cert_hash);
+
+    data = g_key_file_to_data(kf, &length, NULL);
+
+    if (g_mkdir_with_parents(NMSTATEDIR, 0700) < 0) {
+        _NMLOG(LOGL_WARN, "cannot create state dir " NMSTATEDIR);
+        return FALSE;
+    }
+
+    if (!g_file_set_contents(TOFU_CERT_STORE, data, (gssize) length, &error)) {
+        _NMLOG(LOGL_WARN, "cannot write cert store: %s", error->message);
+        return FALSE;
+    }
+
+    _NMLOG(LOGL_INFO, "pinned cert for uuid=%s hash=%.16s...", uuid, cert_hash);
+    return TRUE;
+}
+
+gboolean
+nm_tofu_is_uuid_trusted(const char *uuid)
+{
+    nm_auto_unref_keyfile GKeyFile *kf    = NULL;
+    gs_free_error GError           *error = NULL;
+
+    g_return_val_if_fail(uuid && *uuid, FALSE);
+
+    if (!g_file_test(TOFU_CERT_STORE, G_FILE_TEST_EXISTS))
+        return FALSE;
+
+    kf = g_key_file_new();
+    if (!g_key_file_load_from_file(kf, TOFU_CERT_STORE, G_KEY_FILE_NONE, &error)) {
+        _NMLOG(LOGL_WARN, "cannot load cert store: %s", error->message);
+        return FALSE;
+    }
+
+    return g_key_file_has_group(kf, uuid);
+}
+
+gboolean
+nm_tofu_is_cert_hash_trusted(const char *uuid, const char *observed_hash)
+{
+    nm_auto_unref_keyfile GKeyFile *kf          = NULL;
+    gs_free_error GError           *error       = NULL;
+    gs_free char                   *stored_hash = NULL;
+
+    g_return_val_if_fail(uuid && *uuid, FALSE);
+    g_return_val_if_fail(observed_hash && *observed_hash, FALSE);
+
+    if (!g_file_test(TOFU_CERT_STORE, G_FILE_TEST_EXISTS))
+        return FALSE;
+
+    kf = g_key_file_new();
+    if (!g_key_file_load_from_file(kf, TOFU_CERT_STORE, G_KEY_FILE_NONE, &error)) {
+        _NMLOG(LOGL_WARN, "cannot load cert store: %s", error->message);
+        return FALSE;
+    }
+
+    if (!g_key_file_has_group(kf, uuid))
+        return FALSE;
+
+    stored_hash = g_key_file_get_string(kf, uuid, "cert_hash", &error);
+    if (!stored_hash) {
+        _NMLOG(LOGL_WARN,
+               "no cert_hash for uuid=%s: %s",
+               uuid,
+               error ? error->message : "(unknown)");
+        return FALSE;
+    }
+
+    return nm_streq(stored_hash, observed_hash);
+}
+
+void
+nm_tofu_remove_server_cert_from_trusted(const char *uuid)
+{
+    nm_auto_unref_keyfile GKeyFile *kf    = NULL;
+    gs_free_error GError           *error = NULL;
+    gs_free char                   *data  = NULL;
+
+    if (!uuid || !*uuid) {
+        _NMLOG(LOGL_WARN, "remove_trusted: UUID is empty");
+        return;
+    }
+
+    if (!g_file_test(TOFU_CERT_STORE, G_FILE_TEST_EXISTS))
+        return;
+
+    kf = g_key_file_new();
+    if (!g_key_file_load_from_file(kf, TOFU_CERT_STORE, G_KEY_FILE_NONE, &error)) {
+        _NMLOG(LOGL_WARN, "cannot load cert store: %s", error->message);
+        return;
+    }
+
+    if (!g_key_file_has_group(kf, uuid)) {
+        _NMLOG(LOGL_DEBUG, "uuid=%s not in cert store, nothing to remove", uuid);
+        return;
+    }
+
+    g_key_file_remove_group(kf, uuid, NULL);
+
+    data = g_key_file_to_data(kf, NULL, NULL);
+    if (!g_file_set_contents(TOFU_CERT_STORE, data, -1, &error))
+        _NMLOG(LOGL_WARN, "cannot update cert store after remove: %s", error->message);
+    else
+        _NMLOG(LOGL_INFO, "removed pinned cert for uuid=%s", uuid);
+}
+
+/*****************************************************************************/
+/* CA cert from connection profile (CONFIGURED_CA path)                        */
+
+void
+nm_tofu_save_config_ca_cert_data(GBytes *cert_data)
+{
+    NMTOFUCertInfo *info;
+
+    g_return_if_fail(cert_data);
+
+    nm_clear_pointer(&s_config_cert, cert_session_free);
+    s_config_cert = cert_session_new();
+
+    info            = g_new0(NMTOFUCertInfo, 1);
+    info->cert_data = g_bytes_ref(cert_data);
+    g_ptr_array_add(s_config_cert->certs, info);
+    s_config_cert->finalized = TRUE;
+
+    _NMLOG(LOGL_DEBUG, "saved config CA cert (%zu bytes)", g_bytes_get_size(cert_data));
+}
+
+/*****************************************************************************/
+/* GnuTLS helpers (static — internal to this module)                          */
+
+/*
+ * Extract DNS names from the Subject Alternative Name extension of a
+ * DER-encoded cert.  Falls back to Common Name if no DNS SAN is present.
+ * Returns a GPtrArray of (char *); caller must g_ptr_array_unref().
+ */
+static GPtrArray *
+extract_san_dnsnames(GBytes *cert_data)
+{
+    gnutls_x509_crt_t  crt;
+    gnutls_datum_t     datum;
+    GPtrArray         *names;
+    unsigned int       idx     = 0;
+    void              *san_buf = NULL;
+    size_t             san_len;
+    unsigned int       san_type;
+    char               cn_buf[256];
+    size_t             cn_len = sizeof(cn_buf);
+
+    names = g_ptr_array_new_with_free_func(g_free);
+
+    datum.data = (unsigned char *) g_bytes_get_data(cert_data, NULL);
+    datum.size = g_bytes_get_size(cert_data);
+
+    if (datum.size == 0)
+        return names;
+
+    if (gnutls_x509_crt_init(&crt) < 0) {
+        _NMLOG(LOGL_WARN, "extract_san: gnutls_x509_crt_init() failed");
+        return names;
+    }
+
+    if (gnutls_x509_crt_import(crt, &datum, GNUTLS_X509_FMT_DER) < 0) {
+        _NMLOG(LOGL_WARN, "extract_san: cert DER import failed");
+        gnutls_x509_crt_deinit(crt);
+        return names;
+    }
+
+    while (gnutls_x509_crt_get_subject_alt_name(crt, idx, &san_buf, &san_len, &san_type)
+           == GNUTLS_E_SUCCESS) {
+        if (san_type == GNUTLS_SAN_DNSNAME || san_type == GNUTLS_SAN_URI)
+            g_ptr_array_add(names, g_strndup(san_buf, san_len));
+        gnutls_free(san_buf);
+        san_buf = NULL;
+        idx++;
+    }
+
+    if (names->len == 0) {
+        /* Fall back to Common Name. */
+        if (gnutls_x509_crt_get_dn_by_oid(crt,
+                                            GNUTLS_OID_X520_COMMON_NAME,
+                                            0,
+                                            0,
+                                            cn_buf,
+                                            &cn_len)
+            >= 0)
+            g_ptr_array_add(names, g_strdup(cn_buf));
+    }
+
+    gnutls_x509_crt_deinit(crt);
+    return names;
+}
+
+/*****************************************************************************/
+/* Cert verification (static — called only from within this module)            */
+
+/*
+ * Verify the leaf cert (depth==0) in @session against the system CA bundle.
+ * Returns: 1 = trusted, 0 = not trusted, negative = error.
+ */
+static int
+tofu_verify_leaf_cert_with_system_ca(NMTOFUCertSession *session)
+{
+    NMTOFUCertInfo           *leaf = NULL;
+    gnutls_x509_crt_t         crt;
+    gnutls_datum_t             datum;
+    gnutls_x509_trust_list_t   trust;
+    unsigned int               verify;
+    int                        ret;
+    guint                      i;
+
+    if (!session || !session->certs)
+        return -10;
+
+    for (i = 0; i < session->certs->len; i++) {
+        NMTOFUCertInfo *info = g_ptr_array_index(session->certs, i);
+
+        if (info && info->depth == 0) {
+            leaf = info;
+            break;
+        }
+    }
+    if (!leaf || !leaf->cert_data)
+        return -9;
+
+    datum.data = (unsigned char *) g_bytes_get_data(leaf->cert_data, NULL);
+    datum.size = g_bytes_get_size(leaf->cert_data);
+    if (!datum.data || datum.size == 0)
+        return -8;
+
+    ret = gnutls_x509_crt_init(&crt);
+    if (ret < 0)
+        return -7;
+
+    ret = gnutls_x509_crt_import(crt, &datum, GNUTLS_X509_FMT_DER);
+    if (ret < 0) {
+        gnutls_x509_crt_deinit(crt);
+        return -6;
+    }
+
+    ret = gnutls_x509_trust_list_init(&trust, 0);
+    if (ret < 0) {
+        gnutls_x509_crt_deinit(crt);
+        return -5;
+    }
+
+    ret = gnutls_x509_trust_list_add_system_trust(trust, 0, 0);
+    if (ret < 0) {
+        gnutls_x509_trust_list_deinit(trust, 1);
+        gnutls_x509_crt_deinit(crt);
+        return -4;
+    }
+
+    ret = gnutls_x509_trust_list_verify_crt(trust, &crt, 1, 0, &verify, NULL);
+    gnutls_x509_trust_list_deinit(trust, 1);
+    gnutls_x509_crt_deinit(crt);
+
+    if (ret < 0)
+        return -3;
+
+    return (verify == 0) ? 1 : 0;
+}
+
+/*
+ * Verify the observed leaf cert against the CA cert stored in the
+ * connection profile.  Notifies the registered CertificateAgent on
+ * mismatch.  Connection deactivation is added in commit 6.
+ */
+static void
+tofu_verify_leaf_cert_with_config_ca(const char        *ssid,
+                                      NMTOFUCertSession *config_session,
+                                      NMTOFUCertSession *observed_session)
+{
+    NMTOFUCertInfo    *config_ca = NULL;
+    NMTOFUCertInfo    *leaf      = NULL;
+    gnutls_x509_crt_t  crt_leaf, crt_ca;
+    gnutls_datum_t     d_leaf, d_ca;
+    gnutls_x509_crt_t  ca_list[1];
+    unsigned int       verify = 0;
+    int                ret;
+    guint              i;
+
+    _NMLOG(LOGL_INFO, "CONFIGURED_CA: verifying leaf cert for SSID=%s", ssid);
+
+    if (!config_session || !config_session->certs || config_session->certs->len == 0) {
+        _NMLOG(LOGL_WARN, "CONFIGURED_CA: no CA cert in config session for SSID=%s", ssid);
+        return;
+    }
+    if (!observed_session || !observed_session->certs || observed_session->certs->len == 0) {
+        _NMLOG(LOGL_WARN, "CONFIGURED_CA: no observed certs for SSID=%s", ssid);
+        return;
+    }
+
+    config_ca = g_ptr_array_index(config_session->certs, 0);
+
+    for (i = 0; i < observed_session->certs->len; i++) {
+        NMTOFUCertInfo *info = g_ptr_array_index(observed_session->certs, i);
+
+        if (info && info->depth == 0) {
+            leaf = info;
+            break;
+        }
+    }
+
+    if (!leaf || !config_ca) {
+        _NMLOG(LOGL_WARN, "CONFIGURED_CA: missing leaf or CA cert for SSID=%s", ssid);
+        return;
+    }
+
+    d_leaf.data = (unsigned char *) g_bytes_get_data(leaf->cert_data, NULL);
+    d_leaf.size = g_bytes_get_size(leaf->cert_data);
+    d_ca.data   = (unsigned char *) g_bytes_get_data(config_ca->cert_data, NULL);
+    d_ca.size   = g_bytes_get_size(config_ca->cert_data);
+
+    gnutls_x509_crt_init(&crt_leaf);
+    gnutls_x509_crt_init(&crt_ca);
+
+    if (gnutls_x509_crt_import(crt_leaf, &d_leaf, GNUTLS_X509_FMT_DER) != GNUTLS_E_SUCCESS
+        || gnutls_x509_crt_import(crt_ca, &d_ca, GNUTLS_X509_FMT_PEM) != GNUTLS_E_SUCCESS) {
+        _NMLOG(LOGL_WARN, "CONFIGURED_CA: cert parse failed for SSID=%s", ssid);
+        gnutls_x509_crt_deinit(crt_leaf);
+        gnutls_x509_crt_deinit(crt_ca);
+        return;
+    }
+
+    ca_list[0] = crt_ca;
+    ret        = gnutls_x509_crt_verify(crt_leaf, ca_list, 1, 0, &verify);
+
+    gnutls_x509_crt_deinit(crt_leaf);
+    gnutls_x509_crt_deinit(crt_ca);
+
+    if (ret < 0 || verify != 0) {
+        NMDBusManager   *dbus_mgr;
+        GDBusConnection *dbus_conn;
+
+        _NMLOG(LOGL_WARN,
+               "CONFIGURED_CA: leaf cert verification FAILED for SSID=%s (flags=0x%x)",
+               ssid,
+               verify);
+
+        dbus_mgr  = nm_dbus_manager_get();
+        dbus_conn = nm_dbus_manager_get_dbus_connection(dbus_mgr);
+        nm_certificate_agent_notify_failure(dbus_conn,
+                                            ssid,
+                                            "Server certificate does not match the "
+                                            "configured CA certificate.");
+        /* Connection deactivation added in commit 6. */
+    } else {
+        _NMLOG(LOGL_INFO, "CONFIGURED_CA: leaf cert OK for SSID=%s", ssid);
+    }
+}
+
+/*****************************************************************************/
+/* Stage 3: parse cert + dispatch to agent                                     */
+
+/*
+ * Called when the agent responds (accept/reject) or the call times out.
+ * Pins the cert hash on accept.  Connection management (reconnect /
+ * remove profile) is added in commit 6.
+ */
+static void
+tofu_on_agent_response(gboolean accepted, const char *ssid, gpointer user_data)
+{
+    _NMLOG(LOGL_INFO,
+           "agent response: %s for SSID=%s",
+           accepted ? "ACCEPTED" : "REJECTED",
+           ssid ?: "(null)");
+
+    if (!ssid || !*ssid) {
+        _NMLOG(LOGL_WARN, "agent response: empty SSID — ignoring");
+        return;
+    }
+    if (!nm_streq0(ssid, s_ssid)) {
+        _NMLOG(LOGL_WARN,
+               "agent response: SSID mismatch (got=%s expected=%s) — stale session",
+               ssid,
+               s_ssid ?: "");
+        return;
+    }
+
+    if (accepted) {
+        /* Pin the leaf cert hash so future connections skip the TOFU prompt. */
+        if (s_observed_certs) {
+            guint i;
+
+            for (i = 0; i < s_observed_certs->certs->len; i++) {
+                NMTOFUCertInfo *info = g_ptr_array_index(s_observed_certs->certs, i);
+
+                if (info && info->depth == 0 && info->hash) {
+                    nm_tofu_mark_server_cert_as_trusted(s_uuid, info->hash);
+                    break;
+                }
+            }
+        }
+    } else {
+        nm_tofu_remove_server_cert_from_trusted(s_uuid);
+    }
+
+    nm_tofu_reset_session();
+    /* commit 6 adds: autoconnect + re-activate (accept) or remove profile (reject). */
+}
+
+/*
+ * Parse the top-of-chain cert from s_observed_certs, extract display
+ * fields (CN, issuer, org, SHA-256 fingerprint, expiry, SAN DNS names),
+ * then dispatch an async CertificateVerificationRequest to the registered
+ * agent.
+ */
+static void
+tofu_parse_and_dispatch(const char *disclaimer)
+{
+    NMTOFUCertInfo    *show_cert = NULL;
+    NMTOFUCertInfo    *leaf_cert = NULL;
+    gnutls_x509_crt_t  crt;
+    gnutls_datum_t     datum;
+    char               cn[256]        = {0};
+    char               issuer[256]    = {0};
+    char               org[256]       = {0};
+    char               sha256_hex[65] = {0};
+    char               exp_str[128]   = {0};
+    size_t             field_len;
+    unsigned char      sha256_raw[32];
+    size_t             sha256_len = sizeof(sha256_raw);
+    time_t             exp_time;
+    struct tm         *tm_info;
+    GPtrArray         *san_names = NULL;
+    const char        *best_url  = "N/A";
+    NMDBusManager     *dbus_mgr;
+    GDBusConnection   *dbus_conn;
+    guint              i;
+
+    if (!s_observed_certs || s_observed_certs->certs->len == 0) {
+        _NMLOG(LOGL_WARN, "no certs to dispatch for SSID=%s", s_ssid);
+        return;
+    }
+
+    _NMLOG(LOGL_INFO,
+           "dispatching %u cert(s) for SSID=%s",
+           s_observed_certs->certs->len,
+           s_ssid);
+
+    /* Index 0 = top of chain (shown to user); find depth==0 for SAN. */
+    show_cert = g_ptr_array_index(s_observed_certs->certs, 0);
+
+    for (i = 0; i < s_observed_certs->certs->len; i++) {
+        NMTOFUCertInfo *info = g_ptr_array_index(s_observed_certs->certs, i);
+
+        if (info && info->depth == 0) {
+            leaf_cert = info;
+            break;
+        }
+    }
+
+    if (!show_cert || !show_cert->cert_data) {
+        _NMLOG(LOGL_WARN, "invalid cert data for dispatch");
+        return;
+    }
+
+    datum.data = (unsigned char *) g_bytes_get_data(show_cert->cert_data, NULL);
+    datum.size = g_bytes_get_size(show_cert->cert_data);
+
+    if (gnutls_x509_crt_init(&crt) < 0
+        || gnutls_x509_crt_import(crt, &datum, GNUTLS_X509_FMT_DER) < 0) {
+        _NMLOG(LOGL_WARN, "cert parse failed for dispatch (SSID=%s)", s_ssid);
+        return;
+    }
+
+    field_len = sizeof(cn);
+    gnutls_x509_crt_get_dn_by_oid(crt, GNUTLS_OID_X520_COMMON_NAME, 0, 0, cn, &field_len);
+
+    field_len = sizeof(issuer);
+    gnutls_x509_crt_get_issuer_dn_by_oid(crt,
+                                          GNUTLS_OID_X520_COMMON_NAME,
+                                          0,
+                                          0,
+                                          issuer,
+                                          &field_len);
+
+    field_len = sizeof(org);
+    gnutls_x509_crt_get_dn_by_oid(crt,
+                                   GNUTLS_OID_X520_ORGANIZATION_NAME,
+                                   0,
+                                   0,
+                                   org,
+                                   &field_len);
+
+    gnutls_x509_crt_get_fingerprint(crt, GNUTLS_DIG_SHA256, sha256_raw, &sha256_len);
+    for (i = 0; i < sha256_len; i++)
+        (void) sprintf(&sha256_hex[i * 2], "%02X", sha256_raw[i]);
+
+    exp_time = gnutls_x509_crt_get_expiration_time(crt);
+    tm_info  = localtime(&exp_time);
+    if (tm_info)
+        strftime(exp_str, sizeof(exp_str), "%c", tm_info);
+
+    gnutls_x509_crt_deinit(crt);
+
+    if (leaf_cert && leaf_cert->cert_data) {
+        san_names = extract_san_dnsnames(leaf_cert->cert_data);
+        if (san_names->len > 0)
+            best_url = g_ptr_array_index(san_names, 0);
+    }
+
+    _NMLOG(LOGL_INFO,
+           "cert display fields: cn=%s issuer=%s org=%s sha256=%.16s... exp=%s url=%s",
+           cn,
+           issuer,
+           org,
+           sha256_hex,
+           exp_str,
+           best_url);
+
+    dbus_mgr  = nm_dbus_manager_get();
+    dbus_conn = nm_dbus_manager_get_dbus_connection(dbus_mgr);
+
+    nm_certificate_agent_call_request(dbus_conn,
+                                       s_ssid,
+                                       cn,
+                                       issuer,
+                                       org,
+                                       sha256_hex,
+                                       exp_str,
+                                       disclaimer ?: "",
+                                       best_url,
+                                       tofu_on_agent_response,
+                                       NULL);
+
+    nm_clear_pointer(&san_names, g_ptr_array_unref);
+}
+
+/*
+ * Stage 3 entry for TOFU path: verify against system CAs (informational),
+ * then dispatch cert info to the registered CertificateAgent for user
+ * acceptance.
+ *
+ * Commit 6 adds: deactivate connection and disable autoconnect before
+ * dispatching to prevent re-connection while user is deciding.
+ */
+static void
+tofu_stage3(void)
+{
+    int         sys_result;
+    const char *disclaimer;
+
+    sys_result = tofu_verify_leaf_cert_with_system_ca(s_observed_certs);
+    switch (sys_result) {
+    case 1:
+        _NMLOG(LOGL_INFO, "server cert trusted by system CAs");
+        disclaimer = _("The server certificate is trusted by the system's CA bundle.");
+        break;
+    case 0:
+        _NMLOG(LOGL_INFO, "server cert NOT trusted by system CAs (self-signed or unknown CA)");
+        disclaimer = _("The server certificate is not trusted by the system's CA bundle. "
+                       "Please verify the certificate carefully.");
+        break;
+    default:
+        _NMLOG(LOGL_WARN, "system CA verification error %d", sys_result);
+        disclaimer = _("An error occurred while verifying the server certificate.");
+        break;
+    }
+
+    /* commit 6: tofu_deauthenticate_connection_by_ssid(s_ssid) goes here. */
+
+    tofu_parse_and_dispatch(disclaimer);
+}
+
+/*****************************************************************************/
+/* Stage 2: cert collection from wpa_supplicant Certification signal           */
+
+/*
+ * nm_tofu_stage2_cert_signal:
+ * @parameters: GVariant from the wpa_supplicant Certification signal.
+ *              Expected format: (@a{sv}) with keys:
+ *              "depth" (u), "subject" (s), "cert_hash" (s), "cert" (ay).
+ *
+ * Accumulates server certificates from the ongoing TLS handshake.
+ * Dispatches to Stage 3 when the leaf cert (depth==0) is received.
+ * Connected to the supplicant-interface signal handler in commit 8.
+ */
+void
+nm_tofu_stage2_cert_signal(GVariant *parameters)
+{
+    gs_unref_variant GVariant *dict      = NULL;
+    GVariantIter              *iter      = NULL;
+    const char                *key;
+    GVariant                  *value;
+    const char                *subject   = NULL;
+    const char                *hash      = NULL;
+    guint                      depth     = G_MAXUINT;
+    GBytes                    *cert_data = NULL;
+    NMTOFUCertInfo            *info;
+    guint                      i;
+
+    if (s_session_type == NM_TOFU_SESSION_TYPE_DEFAULT) {
+        _NMLOG(LOGL_DEBUG, "stage2: no active TOFU session — ignoring Certification signal");
+        return;
+    }
+
+    g_return_if_fail(parameters != NULL);
+
+    g_variant_get(parameters, "(@a{sv})", &dict);
+    g_variant_get(dict, "a{sv}", &iter);
+
+    while (g_variant_iter_next(iter, "{sv}", &key, &value)) {
+        if (nm_streq(key, "depth"))
+            depth = g_variant_get_uint32(value);
+        else if (nm_streq(key, "subject"))
+            subject = g_variant_get_string(value, NULL);
+        else if (nm_streq(key, "cert_hash"))
+            hash = g_variant_get_string(value, NULL);
+        else if (nm_streq(key, "cert"))
+            cert_data = g_bytes_ref(g_variant_get_data_as_bytes(value));
+        g_variant_unref(value);
+    }
+    g_variant_iter_free(iter);
+
+    if (depth == G_MAXUINT || !subject || !hash || !cert_data) {
+        _NMLOG(LOGL_WARN, "stage2: incomplete Certification signal — ignoring");
+        nm_clear_pointer(&cert_data, g_bytes_unref);
+        return;
+    }
+
+    if (!s_observed_certs)
+        s_observed_certs = cert_session_new();
+
+    /* Deduplicate by (depth, hash). */
+    for (i = 0; i < s_observed_certs->certs->len; i++) {
+        NMTOFUCertInfo *existing = g_ptr_array_index(s_observed_certs->certs, i);
+
+        if (existing->depth == depth && nm_streq0(existing->hash, hash)) {
+            _NMLOG(LOGL_DEBUG,
+                   "stage2: duplicate cert depth=%u hash=%.16s... — skipping",
+                   depth,
+                   hash);
+            g_bytes_unref(cert_data);
+            return;
+        }
+    }
+
+    info            = g_new0(NMTOFUCertInfo, 1);
+    info->depth     = depth;
+    info->subject   = g_strdup(subject);
+    info->hash      = g_strdup(hash);
+    info->cert_data = cert_data;
+    g_ptr_array_add(s_observed_certs->certs, info);
+
+    _NMLOG(LOGL_INFO,
+           "stage2: collected cert depth=%u subject=%s hash=%.16s...",
+           depth,
+           subject,
+           hash);
+
+    if (depth != 0 || s_observed_certs->finalized)
+        return;
+
+    /* Leaf cert arrived — trigger dispatch based on session type. */
+    s_observed_certs->finalized = TRUE;
+    _NMLOG(LOGL_INFO,
+           "stage2: leaf cert received, session_type=%d SSID=%s",
+           (int) s_session_type,
+           s_ssid);
+
+    switch (s_session_type) {
+    case NM_TOFU_SESSION_TYPE_TOFU:
+        tofu_stage3();
+        break;
+
+    case NM_TOFU_SESSION_TYPE_CONFIGURED_CA:
+        tofu_verify_leaf_cert_with_config_ca(s_ssid, s_config_cert, s_observed_certs);
+        break;
+
+    case NM_TOFU_SESSION_TYPE_USER_TRUSTED_NO_CA:
+        if (nm_tofu_is_cert_hash_trusted(s_uuid, hash)) {
+            _NMLOG(LOGL_INFO,
+                   "stage2: pinned cert matched for SSID=%s — connection continues",
+                   s_ssid);
+        } else {
+            _NMLOG(LOGL_INFO,
+                   "stage2: cert hash changed for SSID=%s — re-entering TOFU flow",
+                   s_ssid);
+            tofu_stage3();
+        }
+        break;
+
+    default:
+        _NMLOG(LOGL_WARN, "stage2: unexpected session type %d", (int) s_session_type);
+        break;
+    }
+}
