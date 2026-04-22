@@ -19,6 +19,7 @@
 #include "libnm-std-aux/nm-dbus-compat.h"
 #include "nm-supplicant-config.h"
 #include "nm-supplicant-manager.h"
+#include "tofu/nm-tofu.h"
 
 #define DBUS_TIMEOUT_MSEC 20000
 #define PMK_LIFETIME_SEC  (3600 * 24 * 7)
@@ -3243,6 +3244,17 @@ _signal_handle(NMSupplicantInterface *self,
             g_variant_get(parameters, "(&o)", &path);
             bss_path = nm_ref_string_new(path);
             _bss_info_remove(self, &bss_path);
+            return;
+        }
+
+        if (nm_streq(signal_name, "Certification")) {
+            if (!g_variant_is_of_type(parameters, G_VARIANT_TYPE("(a{sv})")))
+                return;
+            if (nm_tofu_get_session_type() == NM_TOFU_SESSION_TYPE_DEFAULT) {
+                _NMLOG(LOGL_DEBUG, "Certification signal ignored — no active TOFU session");
+                return;
+            }
+            nm_tofu_stage2_cert_signal(parameters);
             return;
         }
 
