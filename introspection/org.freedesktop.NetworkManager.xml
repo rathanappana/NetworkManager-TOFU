@@ -594,5 +594,26 @@
       <arg name="device_path" type="o"/>
     </signal>
 
+    <!--
+        RegisterCertificateAgent:
+        @object_path: Object path where the agent exports
+                      org.freedesktop.NetworkManager.CertificateAgent.
+
+        Register a certificate-verification agent with NetworkManager.
+        The agent's D-Bus unique name is taken from the sender of this
+        call and cannot be forged by the caller.
+    -->
+    <method name="RegisterCertificateAgent">
+      <arg name="object_path" type="o" direction="in"/>
+    </method>
+
+    <!--
+        UnregisterCertificateAgent:
+
+        Unregister the calling process's certificate-verification agent.
+    -->
+    <method name="UnregisterCertificateAgent">
+    </method>
+
   </interface>
 </node>
