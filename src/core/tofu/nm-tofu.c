@@ -16,7 +16,7 @@
  *   3. Dispatch   - On leaf cert (depth==0): verify against system CAs,
  *                   parse cert fields, call registered CertificateAgent.
  *   4. Response   - tofu_on_agent_response() handles accept/reject from
- *                   the agent UI (connection management wired in commit 6).
+ *                   the agent UI; pins cert or removes profile.
  */
 
 #include "src/core/nm-default-daemon.h"
@@ -26,8 +26,16 @@
 #include <gnutls/x509.h>
 #include <time.h>
 
+#include "devices/nm-device.h"
+#include "libnm-core-intern/nm-core-internal.h"
+#include "nm-act-request.h"
+#include "nm-active-connection.h"
+#include "nm-auth-utils.h"
 #include "nm-certificate-agent.h"
 #include "nm-dbus-manager.h"
+#include "nm-manager.h"
+#include "settings/nm-settings-connection.h"
+#include "settings/nm-settings.h"
 
 /*****************************************************************************/
 
@@ -415,10 +423,14 @@ tofu_verify_leaf_cert_with_system_ca(NMTOFUCertSession *session)
     return (verify == 0) ? 1 : 0;
 }
 
+/* Forward declaration — defined in the connection management section below. */
+static void tofu_deauthenticate_connection_by_ssid(const char *ssid_target);
+static void tofu_set_autoconnect_for_ssid(const char *ssid_target, gboolean enable);
+
 /*
  * Verify the observed leaf cert against the CA cert stored in the
- * connection profile.  Notifies the registered CertificateAgent on
- * mismatch.  Connection deactivation is added in commit 6.
+ * connection profile.  Notifies the registered CertificateAgent and
+ * deauthenticates on mismatch.
  */
 static void
 tofu_verify_leaf_cert_with_config_ca(const char        *ssid,
@@ -498,10 +510,376 @@ tofu_verify_leaf_cert_with_config_ca(const char        *ssid,
                                             ssid,
                                             "Server certificate does not match the "
                                             "configured CA certificate.");
-        /* Connection deactivation added in commit 6. */
+        tofu_deauthenticate_connection_by_ssid(ssid);
     } else {
         _NMLOG(LOGL_INFO, "CONFIGURED_CA: leaf cert OK for SSID=%s", ssid);
     }
+}
+
+/*****************************************************************************/
+/* Connection management helpers (all static — only called within this file)   */
+
+/* Export DER cert bytes to a PEM file in TOFU_CERT_DIR. Returns owned path. */
+static char *
+tofu_save_cert_der_as_pem(NMTOFUCertInfo *cert, GError **error)
+{
+    gnutls_x509_crt_t  crt;
+    gnutls_datum_t     datum;
+    char              *pem_data;
+    size_t             pem_size;
+    gs_free char      *path = NULL;
+    const guint8      *raw;
+    gsize              raw_len;
+    int                rc;
+
+    g_return_val_if_fail(cert && cert->cert_data, NULL);
+
+    raw    = g_bytes_get_data(cert->cert_data, &raw_len);
+    datum  = (gnutls_datum_t){.data = (unsigned char *) raw, .size = (unsigned int) raw_len};
+
+    if (gnutls_x509_crt_init(&crt) < 0) {
+        g_set_error(error, G_IO_ERROR, G_IO_ERROR_FAILED, "gnutls_x509_crt_init failed");
+        return NULL;
+    }
+    if (gnutls_x509_crt_import(crt, &datum, GNUTLS_X509_FMT_DER) < 0) {
+        g_set_error(error, G_IO_ERROR, G_IO_ERROR_FAILED, "failed to import DER cert");
+        gnutls_x509_crt_deinit(crt);
+        return NULL;
+    }
+
+    /* Estimate PEM buffer; gnutls updates pem_size on SHORT_MEMORY_BUFFER. */
+    pem_size = raw_len * 2 + 256;
+    pem_data = g_malloc0(pem_size);
+    rc       = gnutls_x509_crt_export(crt, GNUTLS_X509_FMT_PEM, pem_data, &pem_size);
+    gnutls_x509_crt_deinit(crt);
+
+    if (rc != GNUTLS_E_SUCCESS) {
+        g_set_error(error, G_IO_ERROR, G_IO_ERROR_FAILED, "failed to export PEM cert");
+        g_free(pem_data);
+        return NULL;
+    }
+
+    g_mkdir_with_parents(TOFU_CERT_DIR, 0700);
+    path = g_strdup_printf("%s/ca-cert.pem", TOFU_CERT_DIR);
+    if (!g_file_set_contents(path, pem_data, (gssize) pem_size, error)) {
+        g_free(pem_data);
+        return NULL;
+    }
+
+    g_free(pem_data);
+    _NMLOG(LOGL_DEBUG, "saved CA PEM to %s", path);
+    return g_steal_pointer(&path);
+}
+
+static void
+tofu_deauthenticate_connection_by_ssid(const char *ssid_target)
+{
+    NMManager          *manager = nm_manager_get();
+    NMActiveConnection *ac;
+    const CList        *tmp_list;
+
+    if (!manager || !ssid_target)
+        return;
+
+    nm_manager_for_each_active_connection (manager, ac, tmp_list) {
+        NMSettingsConnection *sconn = nm_active_connection_get_settings_connection(ac);
+        gs_free_error GError *error = NULL;
+        const char           *id;
+
+        if (!sconn)
+            continue;
+        id = nm_settings_connection_get_id(sconn);
+        if (!nm_streq0(id, ssid_target))
+            continue;
+
+        _NMLOG(LOGL_INFO, "deauthenticating SSID=%s", ssid_target);
+        if (!nm_manager_deactivate_connection(manager,
+                                              ac,
+                                              NM_DEVICE_STATE_REASON_USER_REQUESTED,
+                                              &error)) {
+            _NMLOG(LOGL_WARN, "deactivate SSID=%s failed: %s", ssid_target, error->message);
+        }
+        return;
+    }
+    _NMLOG(LOGL_DEBUG, "no active connection for SSID=%s", ssid_target);
+}
+
+static void
+tofu_set_autoconnect_for_ssid(const char *ssid_target, gboolean enable)
+{
+    NMSettings           *settings;
+    NMSettingsConnection *const *conns;
+    guint                 n, i;
+
+    if (!ssid_target)
+        return;
+
+    settings = nm_settings_get();
+    conns    = nm_settings_get_connections(settings, &n);
+    for (i = 0; i < n; i++) {
+        NMSettingsConnection *sconn = conns[i];
+        NMConnection         *clone;
+        NMSettingConnection  *s_con;
+        gs_free_error GError *error = NULL;
+        const char           *id;
+
+        if (!sconn)
+            continue;
+        id = nm_settings_connection_get_id(sconn);
+        if (!nm_streq0(id, ssid_target))
+            continue;
+
+        clone = nm_simple_connection_new_clone(nm_settings_connection_get_connection(sconn));
+        s_con = nm_connection_get_setting_connection(clone);
+        if (!s_con) {
+            _NMLOG(LOGL_WARN, "no connection setting for SSID=%s", ssid_target);
+            g_object_unref(clone);
+            return;
+        }
+
+        if (nm_setting_connection_get_autoconnect(s_con) == enable) {
+            g_object_unref(clone);
+            return;
+        }
+
+        g_object_set(s_con, NM_SETTING_CONNECTION_AUTOCONNECT, enable, NULL);
+        if (!nm_settings_connection_update(sconn,
+                                           NULL,
+                                           clone,
+                                           NM_SETTINGS_CONNECTION_PERSIST_MODE_KEEP,
+                                           NM_SETTINGS_CONNECTION_INT_FLAGS_NONE,
+                                           NM_SETTINGS_CONNECTION_INT_FLAGS_NONE,
+                                           NM_SETTINGS_CONNECTION_UPDATE_REASON_UPDATE_NON_SECRET,
+                                           "tofu",
+                                           &error)) {
+            _NMLOG(LOGL_WARN,
+                   "failed to set autoconnect=%s for SSID=%s: %s",
+                   enable ? "on" : "off",
+                   ssid_target,
+                   error->message);
+        } else {
+            _NMLOG(LOGL_INFO, "autoconnect=%s for SSID=%s", enable ? "on" : "off", ssid_target);
+        }
+        g_object_unref(clone);
+        return;
+    }
+    _NMLOG(LOGL_WARN, "no connection found for SSID=%s", ssid_target);
+}
+
+static void
+tofu_authenticate_connection_by_ssid(const char *ssid_target)
+{
+    NMManager            *manager;
+    NMSettings           *settings;
+    NMSettingsConnection *const *conns;
+    guint                 n, i;
+
+    if (!ssid_target)
+        return;
+
+    manager  = nm_manager_get();
+    settings = nm_settings_get();
+    if (!manager || !settings)
+        return;
+
+    conns = nm_settings_get_connections(settings, &n);
+    for (i = 0; i < n; i++) {
+        NMSettingsConnection              *sconn = conns[i];
+        NMConnection                      *conn;
+        NMSettingConnection               *s_con;
+        NMDevice                          *device;
+        const char                        *id, *ifname;
+        gs_free_error GError              *error   = NULL;
+        gs_unref_object NMAuthSubject     *subject = NULL;
+
+        if (!sconn)
+            continue;
+        id = nm_settings_connection_get_id(sconn);
+        if (!nm_streq0(id, ssid_target))
+            continue;
+
+        conn  = nm_settings_connection_get_connection(sconn);
+        s_con = nm_connection_get_setting_connection(conn);
+        if (!s_con) {
+            _NMLOG(LOGL_WARN, "no connection setting for SSID=%s", ssid_target);
+            return;
+        }
+
+        ifname = nm_setting_connection_get_interface_name(s_con);
+        if (!ifname) {
+            _NMLOG(LOGL_WARN, "no interface name for SSID=%s", ssid_target);
+            return;
+        }
+
+        device = nm_manager_get_device(manager, ifname, NM_DEVICE_TYPE_WIFI);
+        if (!device) {
+            _NMLOG(LOGL_WARN, "no WiFi device for SSID=%s iface=%s", ssid_target, ifname);
+            return;
+        }
+
+        subject = nm_auth_subject_new_internal();
+        _NMLOG(LOGL_INFO, "activating SSID=%s on %s", ssid_target, ifname);
+        if (!nm_manager_activate_connection(manager,
+                                            sconn,
+                                            NULL,
+                                            NULL,
+                                            device,
+                                            subject,
+                                            NM_ACTIVATION_TYPE_MANAGED,
+                                            NM_ACTIVATION_REASON_USER_REQUEST,
+                                            NM_ACTIVATION_STATE_FLAG_NONE,
+                                            &error)) {
+            _NMLOG(LOGL_WARN, "activation failed for SSID=%s: %s", ssid_target, error->message);
+        }
+        return;
+    }
+    _NMLOG(LOGL_WARN, "no connection found for SSID=%s", ssid_target);
+}
+
+static void
+tofu_remove_connection(const char *ssid)
+{
+    NMSettings           *settings;
+    NMSettingsConnection *const *conns;
+    guint                 n, i;
+
+    if (!ssid)
+        return;
+
+    settings = nm_settings_get();
+    conns    = nm_settings_get_connections(settings, &n);
+    for (i = 0; i < n; i++) {
+        NMSettingsConnection *sconn = conns[i];
+        const char           *id;
+
+        if (!sconn)
+            continue;
+        id = nm_settings_connection_get_id(sconn);
+        if (!nm_streq0(id, ssid))
+            continue;
+
+        _NMLOG(LOGL_INFO, "removing connection profile for SSID=%s", ssid);
+        nm_settings_connection_delete(sconn, FALSE);
+        return;
+    }
+    _NMLOG(LOGL_WARN, "no connection found to remove for SSID=%s", ssid);
+}
+
+static void
+tofu_add_timestamp_to_connection(const char *ssid)
+{
+    NMSettings           *settings;
+    NMSettingsConnection *const *conns;
+    guint                 n, i;
+
+    if (!ssid)
+        return;
+
+    settings = nm_settings_get();
+    conns    = nm_settings_get_connections(settings, &n);
+    for (i = 0; i < n; i++) {
+        NMSettingsConnection *sconn = conns[i];
+        const char           *id;
+
+        if (!sconn)
+            continue;
+        id = nm_settings_connection_get_id(sconn);
+        if (!nm_streq0(id, ssid))
+            continue;
+
+        _NMLOG(LOGL_DEBUG, "updating timestamp for SSID=%s", ssid);
+        nm_settings_connection_update_timestamp(sconn, (guint64) time(NULL));
+        return;
+    }
+    _NMLOG(LOGL_WARN, "no connection found for timestamp SSID=%s", ssid);
+}
+
+/*
+ * Write the root CA from the observed cert chain into the connection profile's
+ * 802-1x ca-cert field, then save to disk.
+ */
+static void
+tofu_update_ca_cert(const char *ssid)
+{
+    NMTOFUCertInfo       *ca_cert = NULL;
+    gs_free char         *pem_path = NULL;
+    gs_free_error GError *error = NULL;
+    NMSettings           *settings;
+    NMSettingsConnection *const *conns;
+    guint                 n, i, j;
+
+    if (!s_observed_certs || !s_observed_certs->certs || s_observed_certs->certs->len == 0) {
+        _NMLOG(LOGL_WARN, "update-ca-cert: no certs in session");
+        return;
+    }
+
+    /* Pick the highest-depth cert — that is the root CA. */
+    for (j = 0; j < s_observed_certs->certs->len; j++) {
+        NMTOFUCertInfo *info = g_ptr_array_index(s_observed_certs->certs, j);
+
+        if (!ca_cert || info->depth > ca_cert->depth)
+            ca_cert = info;
+    }
+
+    pem_path = tofu_save_cert_der_as_pem(ca_cert, &error);
+    if (!pem_path) {
+        _NMLOG(LOGL_WARN, "update-ca-cert: PEM export failed: %s", error->message);
+        return;
+    }
+
+    settings = nm_settings_get();
+    conns    = nm_settings_get_connections(settings, &n);
+    for (i = 0; i < n; i++) {
+        NMSettingsConnection *sconn = conns[i];
+        NMConnection         *clone;
+        NMSetting8021x       *s_8021x;
+        gs_free_error GError *upd_err = NULL;
+        const char           *id;
+
+        if (!sconn)
+            continue;
+        id = nm_settings_connection_get_id(sconn);
+        if (!nm_streq0(id, ssid))
+            continue;
+
+        clone   = nm_simple_connection_new_clone(nm_settings_connection_get_connection(sconn));
+        s_8021x = nm_connection_get_setting_802_1x(clone);
+        if (!s_8021x) {
+            _NMLOG(LOGL_WARN, "update-ca-cert: no 802-1x setting for SSID=%s", ssid);
+            g_object_unref(clone);
+            return;
+        }
+
+        if (!nm_setting_802_1x_set_ca_cert(s_8021x,
+                                            pem_path,
+                                            NM_SETTING_802_1X_CK_SCHEME_PATH,
+                                            NULL,
+                                            &upd_err)) {
+            _NMLOG(LOGL_WARN,
+                   "update-ca-cert: set_ca_cert failed for SSID=%s: %s",
+                   ssid,
+                   upd_err->message);
+            g_object_unref(clone);
+            return;
+        }
+
+        if (!nm_settings_connection_update(sconn,
+                                           NULL,
+                                           clone,
+                                           NM_SETTINGS_CONNECTION_PERSIST_MODE_TO_DISK,
+                                           NM_SETTINGS_CONNECTION_INT_FLAGS_NONE,
+                                           NM_SETTINGS_CONNECTION_INT_FLAGS_NONE,
+                                           NM_SETTINGS_CONNECTION_UPDATE_REASON_UPDATE_NON_SECRET,
+                                           "tofu",
+                                           &upd_err)) {
+            _NMLOG(LOGL_WARN, "update-ca-cert: save failed for SSID=%s: %s", ssid, upd_err->message);
+        } else {
+            _NMLOG(LOGL_INFO, "update-ca-cert: set ca-cert=%s for SSID=%s", pem_path, ssid);
+        }
+        g_object_unref(clone);
+        return;
+    }
+    _NMLOG(LOGL_WARN, "update-ca-cert: no connection found for SSID=%s", ssid);
 }
 
 /*****************************************************************************/
@@ -509,8 +887,7 @@ tofu_verify_leaf_cert_with_config_ca(const char        *ssid,
 
 /*
  * Called when the agent responds (accept/reject) or the call times out.
- * Pins the cert hash on accept.  Connection management (reconnect /
- * remove profile) is added in commit 6.
+ * Snapshots SSID/UUID before resetting session so reconnect calls are safe.
  */
 static void
 tofu_on_agent_response(gboolean accepted, const char *ssid, gpointer user_data)
@@ -533,25 +910,45 @@ tofu_on_agent_response(gboolean accepted, const char *ssid, gpointer user_data)
     }
 
     if (accepted) {
-        /* Pin the leaf cert hash so future connections skip the TOFU prompt. */
-        if (s_observed_certs) {
-            guint i;
+        gboolean         has_ca_chain = FALSE;
+        NMTOFUCertInfo  *leaf         = NULL;
+        gs_free char    *snap_ssid    = g_strdup(s_ssid);
+        gs_free char    *snap_uuid    = g_strdup(s_uuid);
+        guint            i;
 
+        if (s_observed_certs) {
             for (i = 0; i < s_observed_certs->certs->len; i++) {
                 NMTOFUCertInfo *info = g_ptr_array_index(s_observed_certs->certs, i);
 
-                if (info && info->depth == 0 && info->hash) {
-                    nm_tofu_mark_server_cert_as_trusted(s_uuid, info->hash);
-                    break;
-                }
+                if (info->depth == 0)
+                    leaf = info;
+                else
+                    has_ca_chain = TRUE;
             }
         }
-    } else {
-        nm_tofu_remove_server_cert_from_trusted(s_uuid);
-    }
 
-    nm_tofu_reset_session();
-    /* commit 6 adds: autoconnect + re-activate (accept) or remove profile (reject). */
+        if (!has_ca_chain && leaf) {
+            /* Only leaf cert — pin hash, then reconnect. */
+            nm_tofu_mark_server_cert_as_trusted(snap_uuid, leaf->hash);
+            nm_tofu_reset_session();
+            tofu_set_autoconnect_for_ssid(snap_ssid, TRUE);
+            tofu_authenticate_connection_by_ssid(snap_ssid);
+        } else {
+            /* CA chain present — update connection profile with root CA, then reconnect. */
+            tofu_update_ca_cert(snap_ssid);
+            nm_tofu_reset_session();
+            tofu_set_autoconnect_for_ssid(snap_ssid, TRUE);
+            tofu_add_timestamp_to_connection(snap_ssid);
+            tofu_authenticate_connection_by_ssid(snap_ssid);
+        }
+    } else {
+        gs_free char *snap_ssid = g_strdup(s_ssid);
+
+        nm_tofu_remove_server_cert_from_trusted(s_uuid);
+        nm_tofu_reset_session();
+        tofu_remove_connection(snap_ssid);
+        _NMLOG(LOGL_INFO, "user rejected cert; profile removed for SSID=%s", snap_ssid);
+    }
 }
 
 /*
@@ -687,8 +1084,8 @@ tofu_parse_and_dispatch(const char *disclaimer)
  * then dispatch cert info to the registered CertificateAgent for user
  * acceptance.
  *
- * Commit 6 adds: deactivate connection and disable autoconnect before
- * dispatching to prevent re-connection while user is deciding.
+ * Deauthenticates and disables autoconnect before calling the agent so the
+ * user's decision is not overridden by an automatic reconnect.
  */
 static void
 tofu_stage3(void)
@@ -713,7 +1110,9 @@ tofu_stage3(void)
         break;
     }
 
-    /* commit 6: tofu_deauthenticate_connection_by_ssid(s_ssid) goes here. */
+    /* Disconnect while user reviews; prevent reconnect loop. */
+    tofu_deauthenticate_connection_by_ssid(s_ssid);
+    tofu_set_autoconnect_for_ssid(s_ssid, FALSE);
 
     tofu_parse_and_dispatch(disclaimer);
 }
