@@ -83,6 +83,50 @@ nmt_8021x_fields_new(NMSetting8021x *setting, gboolean is_wired)
     return g_object_new(NMT_TYPE_8021X_FIELDS, "setting", setting, "is-wired", is_wired, NULL);
 }
 
+static void
+ca_verify_mode_widget_changed(GObject *object, GParamSpec *pspec, gpointer user_data)
+{
+    NMSetting8021x *setting   = user_data;
+    const char     *active_id = nmt_newt_popup_get_active_id(NMT_NEWT_POPUP(object));
+    gint            mode;
+
+    mode = nm_streq0(active_id, "1") ? NM_SETTING_802_1X_CA_VERIFY_MODE_TOFU
+                                     : NM_SETTING_802_1X_CA_VERIFY_MODE_DEFAULT;
+    if (nm_setting_802_1x_get_ca_verify_mode(setting) != mode)
+        g_object_set(setting, NM_SETTING_802_1X_CA_VERIFY_MODE, mode, NULL);
+}
+
+static void
+ca_verify_mode_setting_changed(GObject *object, GParamSpec *pspec, gpointer user_data)
+{
+    NMSetting8021x *setting = NM_SETTING_802_1X(object);
+    gint            mode    = nm_setting_802_1x_get_ca_verify_mode(setting);
+    const char     *id      = mode == NM_SETTING_802_1X_CA_VERIFY_MODE_TOFU ? "1" : "0";
+
+    nmt_newt_popup_set_active_id(NMT_NEWT_POPUP(user_data), id);
+}
+
+static void
+eap_populate_ca_verify_mode(EapMethod *method, NmtNewtWidget *subgrid)
+{
+    static NmtNewtPopupEntry ca_verify_entries[] = {{N_("Default"), "0"},
+                                                    {N_("Trust on First Use"), "1"},
+                                                    {NULL, NULL}};
+    NmtNewtWidget *widget;
+
+    widget = nmt_newt_popup_new(ca_verify_entries);
+    g_signal_connect(widget,
+                     "notify::active-id",
+                     G_CALLBACK(ca_verify_mode_widget_changed),
+                     method->setting);
+    g_signal_connect(method->setting,
+                     "notify::" NM_SETTING_802_1X_CA_VERIFY_MODE,
+                     G_CALLBACK(ca_verify_mode_setting_changed),
+                     widget);
+    ca_verify_mode_setting_changed(G_OBJECT(method->setting), NULL, widget);
+    nmt_editor_grid_append(NMT_EDITOR_GRID(subgrid), _("CA Verify"), widget, NULL);
+}
+
 static gboolean
 eap_methods_to_string(GBinding     *binding,
                       const GValue *source_value,
@@ -444,6 +488,7 @@ eap_method_populate_tls(EapMethod *method, NmtNewtWidget *subgrid)
                            G_BINDING_SYNC_CREATE | G_BINDING_BIDIRECTIONAL);
     nmt_editor_grid_append(NMT_EDITOR_GRID(subgrid), _("User privkey password"), widget, NULL);
 
+    eap_populate_ca_verify_mode(method, subgrid);
     eap_populate_advanced_tls_settings(method, subgrid);
 }
 
@@ -535,6 +580,7 @@ eap_method_populate_ttls(EapMethod *method, NmtNewtWidget *subgrid)
                            G_BINDING_SYNC_CREATE | G_BINDING_BIDIRECTIONAL);
     nmt_editor_grid_append(NMT_EDITOR_GRID(subgrid), _("Password"), widget, NULL);
 
+    eap_populate_ca_verify_mode(method, subgrid);
     eap_populate_advanced_tls_settings(method, subgrid);
 }
 
@@ -641,6 +687,7 @@ eap_method_populate_peap(EapMethod *method, NmtNewtWidget *subgrid)
                            G_BINDING_SYNC_CREATE | G_BINDING_BIDIRECTIONAL);
     nmt_editor_grid_append(NMT_EDITOR_GRID(subgrid), _("Password"), widget, NULL);
 
+    eap_populate_ca_verify_mode(method, subgrid);
     eap_populate_advanced_tls_settings(method, subgrid);
 }
 
