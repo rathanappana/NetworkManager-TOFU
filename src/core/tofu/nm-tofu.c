@@ -584,12 +584,20 @@ tofu_deauthenticate_connection_by_ssid(const char *ssid_target)
     nm_manager_for_each_active_connection (manager, ac, tmp_list) {
         NMSettingsConnection *sconn = nm_active_connection_get_settings_connection(ac);
         gs_free_error GError *error = NULL;
-        const char           *id;
+        NMConnection         *conn;
+        NMSettingWireless    *s_wifi;
+        GBytes               *ssid_bytes;
+        gs_free char         *ssid_str = NULL;
 
         if (!sconn)
             continue;
-        id = nm_settings_connection_get_id(sconn);
-        if (!nm_streq0(id, ssid_target))
+        conn       = nm_settings_connection_get_connection(sconn);
+        s_wifi     = nm_connection_get_setting_wireless(conn);
+        if (!s_wifi)
+            continue;
+        ssid_bytes = nm_setting_wireless_get_ssid(s_wifi);
+        ssid_str   = ssid_bytes ? _nm_utils_ssid_to_utf8(ssid_bytes) : NULL;
+        if (!nm_streq0(ssid_str, ssid_target))
             continue;
 
         _NMLOG(LOGL_INFO, "deauthenticating SSID=%s", ssid_target);
@@ -620,13 +628,19 @@ tofu_set_autoconnect_for_ssid(const char *ssid_target, gboolean enable)
         NMSettingsConnection *sconn = conns[i];
         NMConnection         *clone;
         NMSettingConnection  *s_con;
+        NMSettingWireless    *s_wifi;
         gs_free_error GError *error = NULL;
-        const char           *id;
+        GBytes               *ssid_bytes;
+        gs_free char         *ssid_str = NULL;
 
         if (!sconn)
             continue;
-        id = nm_settings_connection_get_id(sconn);
-        if (!nm_streq0(id, ssid_target))
+        s_wifi     = nm_connection_get_setting_wireless(nm_settings_connection_get_connection(sconn));
+        if (!s_wifi)
+            continue;
+        ssid_bytes = nm_setting_wireless_get_ssid(s_wifi);
+        ssid_str   = ssid_bytes ? _nm_utils_ssid_to_utf8(ssid_bytes) : NULL;
+        if (!nm_streq0(ssid_str, ssid_target))
             continue;
 
         clone = nm_simple_connection_new_clone(nm_settings_connection_get_connection(sconn));
@@ -687,18 +701,25 @@ tofu_authenticate_connection_by_ssid(const char *ssid_target)
         NMSettingsConnection              *sconn = conns[i];
         NMConnection                      *conn;
         NMSettingConnection               *s_con;
+        NMSettingWireless                 *s_wifi;
         NMDevice                          *device;
-        const char                        *id, *ifname;
+        const char                        *ifname;
         gs_free_error GError              *error   = NULL;
         gs_unref_object NMAuthSubject     *subject = NULL;
+        GBytes                            *ssid_bytes;
+        gs_free char                      *ssid_str = NULL;
 
         if (!sconn)
             continue;
-        id = nm_settings_connection_get_id(sconn);
-        if (!nm_streq0(id, ssid_target))
+        conn       = nm_settings_connection_get_connection(sconn);
+        s_wifi     = nm_connection_get_setting_wireless(conn);
+        if (!s_wifi)
+            continue;
+        ssid_bytes = nm_setting_wireless_get_ssid(s_wifi);
+        ssid_str   = ssid_bytes ? _nm_utils_ssid_to_utf8(ssid_bytes) : NULL;
+        if (!nm_streq0(ssid_str, ssid_target))
             continue;
 
-        conn  = nm_settings_connection_get_connection(sconn);
         s_con = nm_connection_get_setting_connection(conn);
         if (!s_con) {
             _NMLOG(LOGL_WARN, "no connection setting for SSID=%s", ssid_target);
@@ -750,12 +771,18 @@ tofu_remove_connection(const char *ssid)
     conns    = nm_settings_get_connections(settings, &n);
     for (i = 0; i < n; i++) {
         NMSettingsConnection *sconn = conns[i];
-        const char           *id;
+        NMSettingWireless    *s_wifi;
+        GBytes               *ssid_bytes;
+        gs_free char         *ssid_str = NULL;
 
         if (!sconn)
             continue;
-        id = nm_settings_connection_get_id(sconn);
-        if (!nm_streq0(id, ssid))
+        s_wifi     = nm_connection_get_setting_wireless(nm_settings_connection_get_connection(sconn));
+        if (!s_wifi)
+            continue;
+        ssid_bytes = nm_setting_wireless_get_ssid(s_wifi);
+        ssid_str   = ssid_bytes ? _nm_utils_ssid_to_utf8(ssid_bytes) : NULL;
+        if (!nm_streq0(ssid_str, ssid))
             continue;
 
         _NMLOG(LOGL_INFO, "removing connection profile for SSID=%s", ssid);
@@ -779,12 +806,18 @@ tofu_add_timestamp_to_connection(const char *ssid)
     conns    = nm_settings_get_connections(settings, &n);
     for (i = 0; i < n; i++) {
         NMSettingsConnection *sconn = conns[i];
-        const char           *id;
+        NMSettingWireless    *s_wifi;
+        GBytes               *ssid_bytes;
+        gs_free char         *ssid_str = NULL;
 
         if (!sconn)
             continue;
-        id = nm_settings_connection_get_id(sconn);
-        if (!nm_streq0(id, ssid))
+        s_wifi     = nm_connection_get_setting_wireless(nm_settings_connection_get_connection(sconn));
+        if (!s_wifi)
+            continue;
+        ssid_bytes = nm_setting_wireless_get_ssid(s_wifi);
+        ssid_str   = ssid_bytes ? _nm_utils_ssid_to_utf8(ssid_bytes) : NULL;
+        if (!nm_streq0(ssid_str, ssid))
             continue;
 
         _NMLOG(LOGL_DEBUG, "updating timestamp for SSID=%s", ssid);
@@ -833,13 +866,19 @@ tofu_update_ca_cert(const char *ssid)
         NMSettingsConnection *sconn = conns[i];
         NMConnection         *clone;
         NMSetting8021x       *s_8021x;
+        NMSettingWireless    *s_wifi;
         gs_free_error GError *upd_err = NULL;
-        const char           *id;
+        GBytes               *ssid_bytes;
+        gs_free char         *ssid_str = NULL;
 
         if (!sconn)
             continue;
-        id = nm_settings_connection_get_id(sconn);
-        if (!nm_streq0(id, ssid))
+        s_wifi     = nm_connection_get_setting_wireless(nm_settings_connection_get_connection(sconn));
+        if (!s_wifi)
+            continue;
+        ssid_bytes = nm_setting_wireless_get_ssid(s_wifi);
+        ssid_str   = ssid_bytes ? _nm_utils_ssid_to_utf8(ssid_bytes) : NULL;
+        if (!nm_streq0(ssid_str, ssid))
             continue;
 
         clone   = nm_simple_connection_new_clone(nm_settings_connection_get_connection(sconn));
