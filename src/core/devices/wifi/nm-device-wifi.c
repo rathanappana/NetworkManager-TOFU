@@ -41,6 +41,7 @@
 #include "nm-wifi-common.h"
 #include "libnm-core-intern/nm-core-internal.h"
 #include "nm-config.h"
+#include "tofu/nm-tofu.h"
 
 #define _NMLOG_DEVICE_TYPE NMDeviceWifi
 #include "devices/nm-device-logging.h"
@@ -3660,6 +3661,52 @@ act_stage2_config(NMDevice *device, NMDeviceStateReason *out_failure_reason)
         nm_supplicant_interface_set_bridge(priv->sup_iface, nm_device_get_iface(controller));
     } else
         nm_supplicant_interface_set_bridge(priv->sup_iface, NULL);
+
+    /* TOFU: detect session type before associating */
+    {
+        NMSetting8021x *s_8021x = nm_connection_get_setting_802_1x(connection);
+
+        if (s_8021x
+            && nm_setting_802_1x_get_ca_verify_mode(s_8021x)
+                   == NM_SETTING_802_1X_CA_VERIFY_MODE_TOFU) {
+            guint    n_eap   = nm_setting_802_1x_get_num_eap_methods(s_8021x);
+            guint    i;
+            gboolean has_eap = FALSE;
+
+            for (i = 0; i < n_eap; i++) {
+                const char *method = nm_setting_802_1x_get_eap_method(s_8021x, i);
+
+                if (NM_IN_STRSET(method, "tls", "ttls", "peap")) {
+                    has_eap = TRUE;
+                    break;
+                }
+            }
+
+            if (has_eap) {
+                NMSetting8021xCKScheme  scheme   = nm_setting_802_1x_get_ca_cert_scheme(s_8021x);
+                const char             *uuid     = nm_settings_connection_get_uuid(sett_conn);
+                gs_free char           *ssid_str = NULL;
+                GBytes                 *ssid_bytes;
+
+                ssid_bytes = nm_setting_wireless_get_ssid(s_wireless);
+                ssid_str   = ssid_bytes ? _nm_utils_ssid_to_utf8(ssid_bytes) : NULL;
+
+                if (scheme != NM_SETTING_802_1X_CK_SCHEME_UNKNOWN) {
+                    if (scheme == NM_SETTING_802_1X_CK_SCHEME_BLOB) {
+                        GBytes *blob = nm_setting_802_1x_get_ca_cert_blob(s_8021x);
+
+                        if (blob)
+                            nm_tofu_save_config_ca_cert_data(blob);
+                    }
+                    nm_tofu_set_session(NM_TOFU_SESSION_TYPE_CONFIGURED_CA, ssid_str, uuid);
+                } else if (nm_tofu_is_uuid_trusted(uuid)) {
+                    nm_tofu_set_session(NM_TOFU_SESSION_TYPE_USER_TRUSTED_NO_CA, ssid_str, uuid);
+                } else {
+                    nm_tofu_set_session(NM_TOFU_SESSION_TYPE_TOFU, ssid_str, uuid);
+                }
+            }
+        }
+    }
 
     nm_supplicant_interface_assoc(priv->sup_iface, config, supplicant_iface_assoc_cb, self);
 
