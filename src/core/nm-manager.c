@@ -49,6 +49,7 @@
 #include "settings/nm-settings-connection.h"
 #include "settings/nm-settings.h"
 #include "vpn/nm-vpn-manager.h"
+#include "tofu/nm-certificate-agent.h"
 
 #define DEVICE_STATE_PRUNE_RATELIMIT_MAX 100u
 
@@ -1805,6 +1806,47 @@ _reload_auth_cb(NMAuthChain *chain, GDBusMethodInvocation *context, gpointer use
     nm_config_reload(priv->config, reload_type, TRUE);
     g_dbus_method_invocation_return_value(context, NULL);
 }
+
+/*****************************************************************************/
+
+static void
+impl_manager_register_certificate_agent(NMDBusObject                      *obj,
+                                        const NMDBusInterfaceInfoExtended *interface_info,
+                                        const NMDBusMethodInfoExtended    *method_info,
+                                        GDBusConnection                   *connection,
+                                        const char                        *sender,
+                                        GDBusMethodInvocation             *invocation,
+                                        GVariant                          *parameters)
+{
+    const char *object_path;
+
+    g_variant_get(parameters, "(&o)", &object_path);
+
+    /*
+     * Use the kernel-verified D-Bus sender as the unique name — never the
+     * caller-supplied string, which could be spoofed.
+     */
+    nm_certificate_agent_register(connection,
+                                  g_dbus_method_invocation_get_sender(invocation),
+                                  object_path,
+                                  invocation);
+}
+
+static void
+impl_manager_unregister_certificate_agent(NMDBusObject                      *obj,
+                                          const NMDBusInterfaceInfoExtended *interface_info,
+                                          const NMDBusMethodInfoExtended    *method_info,
+                                          GDBusConnection                   *connection,
+                                          const char                        *sender,
+                                          GDBusMethodInvocation             *invocation,
+                                          GVariant                          *parameters)
+{
+    nm_certificate_agent_unregister(connection,
+                                    g_dbus_method_invocation_get_sender(invocation),
+                                    invocation);
+}
+
+/*****************************************************************************/
 
 static void
 impl_manager_reload(NMDBusObject                      *obj,
@@ -9405,6 +9447,15 @@ static const NMDBusInterfaceInfoExtended interface_info_manager = {
     .parent = NM_DEFINE_GDBUS_INTERFACE_INFO_INIT(
         NM_DBUS_INTERFACE,
         .methods = NM_DEFINE_GDBUS_METHOD_INFOS(
+            NM_DEFINE_DBUS_METHOD_INFO_EXTENDED(
+                NM_DEFINE_GDBUS_METHOD_INFO_INIT(
+                    "RegisterCertificateAgent",
+                    .in_args = NM_DEFINE_GDBUS_ARG_INFOS(
+                        NM_DEFINE_GDBUS_ARG_INFO("object_path", "o"), ), ),
+                .handle = impl_manager_register_certificate_agent, ),
+            NM_DEFINE_DBUS_METHOD_INFO_EXTENDED(
+                NM_DEFINE_GDBUS_METHOD_INFO_INIT("UnregisterCertificateAgent", ),
+                .handle = impl_manager_unregister_certificate_agent, ),
             NM_DEFINE_DBUS_METHOD_INFO_EXTENDED(
                 NM_DEFINE_GDBUS_METHOD_INFO_INIT("Reload",
                                                  .in_args = NM_DEFINE_GDBUS_ARG_INFOS(
