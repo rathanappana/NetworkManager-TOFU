@@ -519,55 +519,99 @@ tofu_verify_leaf_cert_with_config_ca(const char        *ssid,
 /*****************************************************************************/
 /* Connection management helpers (all static — only called within this file)   */
 
-/* Export DER cert bytes to a PEM file in TOFU_CERT_DIR. Returns owned path. */
+/*
+ * Save the pinned CA cert plus any issuers found in the system trust store as
+ * a concatenated PEM file in TOFU_CERT_DIR.  The full chain (e.g. intermediate +
+ * root) lets OpenSSL in wpa_supplicant complete verification even when
+ * the root is not separately installed on the device.  Returns owned path.
+ */
 static char *
-tofu_save_cert_der_as_pem(NMTOFUCertInfo *cert, GError **error)
+tofu_save_cert_chain_as_pem(NMTOFUCertInfo *cert, GError **error)
 {
-    gnutls_x509_crt_t  crt;
-    gnutls_datum_t     datum;
-    char              *pem_data;
-    size_t             pem_size;
-    gs_free char      *path = NULL;
-    const guint8      *raw;
-    gsize              raw_len;
-    int                rc;
+    gnutls_x509_crt_t        crt;
+    gnutls_datum_t           datum;
+    gnutls_x509_trust_list_t trust_list = NULL;
+    GString                 *pem_out    = g_string_new(NULL);
+    gs_free char            *path       = NULL;
+    const guint8            *raw;
+    gsize                    raw_len;
+    int                      rc;
 
     g_return_val_if_fail(cert && cert->cert_data, NULL);
 
-    raw    = g_bytes_get_data(cert->cert_data, &raw_len);
-    datum  = (gnutls_datum_t){.data = (unsigned char *) raw, .size = (unsigned int) raw_len};
+    raw   = g_bytes_get_data(cert->cert_data, &raw_len);
+    datum = (gnutls_datum_t){.data = (unsigned char *) raw, .size = (unsigned int) raw_len};
 
-    if (gnutls_x509_crt_init(&crt) < 0) {
-        g_set_error(error, G_IO_ERROR, G_IO_ERROR_FAILED, "gnutls_x509_crt_init failed");
-        return NULL;
-    }
+    gnutls_x509_crt_init(&crt);
     if (gnutls_x509_crt_import(crt, &datum, GNUTLS_X509_FMT_DER) < 0) {
-        g_set_error(error, G_IO_ERROR, G_IO_ERROR_FAILED, "failed to import DER cert");
+        g_set_error(error, G_IO_ERROR, G_IO_ERROR_FAILED, "failed to import pinned cert DER");
         gnutls_x509_crt_deinit(crt);
+        g_string_free(pem_out, TRUE);
         return NULL;
     }
 
-    /* Estimate PEM buffer; gnutls updates pem_size on SHORT_MEMORY_BUFFER. */
-    pem_size = raw_len * 2 + 256;
-    pem_data = g_malloc0(pem_size);
-    rc       = gnutls_x509_crt_export(crt, GNUTLS_X509_FMT_PEM, pem_data, &pem_size);
+    /* First block: the pinned cert itself (e.g. GEANT intermediate). */
+    {
+        gnutls_datum_t pem_datum = {};
+
+        rc = gnutls_x509_crt_export2(crt, GNUTLS_X509_FMT_PEM, &pem_datum);
+        if (rc == GNUTLS_E_SUCCESS) {
+            g_string_append_len(pem_out, (char *) pem_datum.data, (gssize) pem_datum.size);
+            gnutls_free(pem_datum.data);
+        }
+    }
+
+    /* Walk up the chain via the system trust store, appending each issuer
+     * until we reach a self-signed root or the store has no more issuers. */
+    gnutls_x509_trust_list_init(&trust_list, 0);
+    if (gnutls_x509_trust_list_add_system_trust(trust_list, 0, 0) > 0) {
+        gnutls_x509_crt_t current = crt;
+        int               depth   = 0;
+
+        while (depth < 10 && !gnutls_x509_crt_check_issuer(current, current)) {
+            gnutls_x509_crt_t issuer = NULL;
+            gnutls_datum_t    pem_datum = {};
+
+            rc = gnutls_x509_trust_list_get_issuer(trust_list, current, &issuer,
+                                                    GNUTLS_TL_GET_COPY);
+            if (rc != GNUTLS_E_SUCCESS || !issuer)
+                break;
+
+            rc = gnutls_x509_crt_export2(issuer, GNUTLS_X509_FMT_PEM, &pem_datum);
+            if (rc == GNUTLS_E_SUCCESS) {
+                g_string_append_len(pem_out, (char *) pem_datum.data, (gssize) pem_datum.size);
+                gnutls_free(pem_datum.data);
+            }
+
+            if (current != crt)
+                gnutls_x509_crt_deinit(current);
+            current = issuer;
+            depth++;
+        }
+
+        if (current != crt)
+            gnutls_x509_crt_deinit(current);
+    }
+    gnutls_x509_trust_list_deinit(trust_list, 0);
     gnutls_x509_crt_deinit(crt);
 
-    if (rc != GNUTLS_E_SUCCESS) {
-        g_set_error(error, G_IO_ERROR, G_IO_ERROR_FAILED, "failed to export PEM cert");
-        g_free(pem_data);
+    if (pem_out->len == 0) {
+        g_set_error(error, G_IO_ERROR, G_IO_ERROR_FAILED, "PEM export produced empty output");
+        g_string_free(pem_out, TRUE);
         return NULL;
     }
 
     g_mkdir_with_parents(TOFU_CERT_DIR, 0700);
-    path = g_strdup_printf("%s/ca-cert.pem", TOFU_CERT_DIR);
-    if (!g_file_set_contents(path, pem_data, (gssize) pem_size, error)) {
-        g_free(pem_data);
+    path = g_strdup_printf("%s/ca-cert-%s.pem",
+                           TOFU_CERT_DIR,
+                           (s_uuid && *s_uuid) ? s_uuid : "unknown");
+    if (!g_file_set_contents(path, pem_out->str, (gssize) pem_out->len, error)) {
+        g_string_free(pem_out, TRUE);
         return NULL;
     }
 
-    g_free(pem_data);
-    _NMLOG(LOGL_DEBUG, "saved CA PEM to %s", path);
+    _NMLOG(LOGL_DEBUG, "saved CA chain PEM (%zu bytes) to %s", pem_out->len, path);
+    g_string_free(pem_out, TRUE);
     return g_steal_pointer(&path);
 }
 
@@ -698,16 +742,14 @@ tofu_authenticate_connection_by_ssid(const char *ssid_target)
 
     conns = nm_settings_get_connections(settings, &n);
     for (i = 0; i < n; i++) {
-        NMSettingsConnection              *sconn = conns[i];
-        NMConnection                      *conn;
-        NMSettingConnection               *s_con;
-        NMSettingWireless                 *s_wifi;
-        NMDevice                          *device;
-        const char                        *ifname;
-        gs_free_error GError              *error   = NULL;
-        gs_unref_object NMAuthSubject     *subject = NULL;
-        GBytes                            *ssid_bytes;
-        gs_free char                      *ssid_str = NULL;
+        NMSettingsConnection          *sconn = conns[i];
+        NMConnection                  *conn;
+        NMSettingWireless             *s_wifi;
+        NMDevice                      *device = NULL;
+        gs_free_error GError          *error   = NULL;
+        gs_unref_object NMAuthSubject *subject = NULL;
+        GBytes                        *ssid_bytes;
+        gs_free char                  *ssid_str = NULL;
 
         if (!sconn)
             continue;
@@ -720,26 +762,25 @@ tofu_authenticate_connection_by_ssid(const char *ssid_target)
         if (!nm_streq0(ssid_str, ssid_target))
             continue;
 
-        s_con = nm_connection_get_setting_connection(conn);
-        if (!s_con) {
-            _NMLOG(LOGL_WARN, "no connection setting for SSID=%s", ssid_target);
-            return;
-        }
+        /* WiFi profiles rarely set connection.interface-name; find any WiFi device. */
+        {
+            NMDevice    *dev_iter;
+            const CList *tmp_list;
 
-        ifname = nm_setting_connection_get_interface_name(s_con);
-        if (!ifname) {
-            _NMLOG(LOGL_WARN, "no interface name for SSID=%s", ssid_target);
-            return;
+            nm_manager_for_each_device(manager, dev_iter, tmp_list) {
+                if (nm_device_get_device_type(dev_iter) == NM_DEVICE_TYPE_WIFI) {
+                    device = dev_iter;
+                    break;
+                }
+            }
         }
-
-        device = nm_manager_get_device(manager, ifname, NM_DEVICE_TYPE_WIFI);
         if (!device) {
-            _NMLOG(LOGL_WARN, "no WiFi device for SSID=%s iface=%s", ssid_target, ifname);
+            _NMLOG(LOGL_WARN, "no WiFi device found for SSID=%s", ssid_target);
             return;
         }
 
         subject = nm_auth_subject_new_internal();
-        _NMLOG(LOGL_INFO, "activating SSID=%s on %s", ssid_target, ifname);
+        _NMLOG(LOGL_INFO, "activating SSID=%s on %s", ssid_target, nm_device_get_iface(device));
         if (!nm_manager_activate_connection(manager,
                                             sconn,
                                             NULL,
@@ -854,7 +895,7 @@ tofu_update_ca_cert(const char *ssid)
             ca_cert = info;
     }
 
-    pem_path = tofu_save_cert_der_as_pem(ca_cert, &error);
+    pem_path = tofu_save_cert_chain_as_pem(ca_cert, &error);
     if (!pem_path) {
         _NMLOG(LOGL_WARN, "update-ca-cert: PEM export failed: %s", error->message);
         return;
