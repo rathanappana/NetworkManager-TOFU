@@ -2025,9 +2025,22 @@ nm_supplicant_config_add_setting_8021x(NMSupplicantConfig *self,
     value = nm_setting_802_1x_get_identity(setting);
     if (!add_string_val(self, value, "identity", FALSE, NULL, error))
         return FALSE;
+
+    /* If the user did not configure anonymous_identity, derive one from the
+     * real identity for phase 1 EAP-Identity privacy: user@realm → anonymous@realm,
+     * or just "anonymous" when there is no realm component. */
     value = nm_setting_802_1x_get_anonymous_identity(setting);
-    if (!add_string_val(self, value, "anonymous_identity", FALSE, NULL, error))
-        return FALSE;
+    if (value && *value) {
+        if (!add_string_val(self, value, "anonymous_identity", FALSE, NULL, error))
+            return FALSE;
+    } else {
+        const char   *ident   = nm_setting_802_1x_get_identity(setting);
+        const char   *at      = ident ? strchr(ident, '@') : NULL;
+        gs_free char *derived = at ? g_strdup_printf("anonymous%s", at) : g_strdup("anonymous");
+
+        if (!add_string_val(self, derived, "anonymous_identity", FALSE, NULL, error))
+            return FALSE;
+    }
     value = nm_setting_802_1x_get_openssl_ciphers(setting);
     if (value && !add_string_val(self, value, "openssl_ciphers", FALSE, NULL, error))
         return FALSE;
