@@ -3703,6 +3703,7 @@ act_stage2_config(NMDevice *device, NMDeviceStateReason *out_failure_reason)
                     nm_tofu_set_session(NM_TOFU_SESSION_TYPE_USER_TRUSTED_NO_CA, ssid_str, uuid);
                 } else {
                     nm_tofu_set_session(NM_TOFU_SESSION_TYPE_TOFU, ssid_str, uuid);
+                    nm_supplicant_config_suppress_credentials_for_tofu(config);
                 }
             }
         }
