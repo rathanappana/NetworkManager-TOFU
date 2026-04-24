@@ -288,6 +288,26 @@ nm_tofu_save_config_ca_cert_data(GBytes *cert_data)
     _NMLOG(LOGL_DEBUG, "saved config CA cert (%zu bytes)", g_bytes_get_size(cert_data));
 }
 
+static void
+tofu_load_config_ca_from_file(const char *pem_path)
+{
+    gs_free char         *pem_data = NULL;
+    gsize                 pem_len  = 0;
+    gs_free_error GError *error    = NULL;
+    GBytes               *bytes;
+
+    g_return_if_fail(pem_path && *pem_path);
+
+    if (!g_file_get_contents(pem_path, &pem_data, &pem_len, &error)) {
+        _NMLOG(LOGL_WARN, "load_config_ca: cannot read %s: %s", pem_path, error->message);
+        return;
+    }
+
+    bytes = g_bytes_new_take(g_steal_pointer(&pem_data), pem_len);
+    nm_tofu_save_config_ca_cert_data(bytes);
+    g_bytes_unref(bytes);
+}
+
 /*****************************************************************************/
 /* GnuTLS helpers (static — internal to this module)                          */
 
@@ -449,8 +469,19 @@ tofu_verify_leaf_cert_with_config_ca(const char        *ssid,
     _NMLOG(LOGL_INFO, "CONFIGURED_CA: verifying leaf cert for SSID=%s", ssid);
 
     if (!config_session || !config_session->certs || config_session->certs->len == 0) {
-        _NMLOG(LOGL_WARN, "CONFIGURED_CA: no CA cert in config session for SSID=%s", ssid);
-        return;
+        /* PATH scheme: s_config_cert not pre-loaded at act_stage2; load now from the
+         * UUID-keyed file written at TOFU acceptance time so NM can independently
+         * verify the cert and fire the failure notification if the CA changed. */
+        if (s_uuid && *s_uuid) {
+            gs_free char *auto_path =
+                g_strdup_printf("%s/ca-cert-%s.pem", TOFU_CERT_DIR, s_uuid);
+            tofu_load_config_ca_from_file(auto_path);
+            config_session = s_config_cert;
+        }
+        if (!config_session || !config_session->certs || config_session->certs->len == 0) {
+            _NMLOG(LOGL_WARN, "CONFIGURED_CA: no CA cert available for SSID=%s", ssid);
+            return;
+        }
     }
     if (!observed_session || !observed_session->certs || observed_session->certs->len == 0) {
         _NMLOG(LOGL_WARN, "CONFIGURED_CA: no observed certs for SSID=%s", ssid);
