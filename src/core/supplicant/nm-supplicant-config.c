@@ -324,6 +324,27 @@ nm_supplicant_config_fast_required(NMSupplicantConfig *self)
     return NM_SUPPLICANT_CONFIG_GET_PRIVATE(self)->fast_required;
 }
 
+void
+nm_supplicant_config_suppress_credentials_for_tofu(NMSupplicantConfig *self)
+{
+    NMSupplicantConfigPrivate *priv;
+
+    g_return_if_fail(NM_IS_SUPPLICANT_CONFIG(self));
+
+    priv = NM_SUPPLICANT_CONFIG_GET_PRIVATE(self);
+
+    /* Strip real credentials so wpa_supplicant cannot complete phase 2
+     * (EAP-MSCHAPv2) on the first TOFU connection attempt.  Phase 1 (TLS
+     * tunnel + Certification signals) still completes because anonymous_identity
+     * was already set by nm_supplicant_config_add_setting_8021x.  Credentials
+     * are never sent to an unverified AP; the user reviews and accepts the cert
+     * before a second attempt with full credentials. */
+    g_hash_table_remove(priv->config, "identity");
+    g_hash_table_remove(priv->config, "password");
+
+    nm_log_info(LOGD_SUPPLICANT, "tofu: stripped identity/password for first-use cert collection");
+}
+
 GVariant *
 nm_supplicant_config_to_variant(NMSupplicantConfig *self)
 {
