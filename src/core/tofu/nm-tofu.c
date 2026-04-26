@@ -267,6 +267,38 @@ nm_tofu_remove_server_cert_from_trusted(const char *uuid)
         _NMLOG(LOGL_INFO, "removed pinned cert for uuid=%s", uuid);
 }
 
+/*
+ * nm_tofu_get_stored_cert_hash:
+ * @uuid: connection UUID
+ *
+ * Returns the pinned leaf cert SHA-256 hex string stored for @uuid, or NULL
+ * if none.  Caller must g_free() the returned string.
+ */
+char *
+nm_tofu_get_stored_cert_hash(const char *uuid)
+{
+    nm_auto_unref_keyfile GKeyFile *kf    = NULL;
+    gs_free_error GError           *error = NULL;
+    char                           *hash;
+
+    g_return_val_if_fail(uuid && *uuid, NULL);
+
+    if (!g_file_test(TOFU_CERT_STORE, G_FILE_TEST_EXISTS))
+        return NULL;
+
+    kf = g_key_file_new();
+    if (!g_key_file_load_from_file(kf, TOFU_CERT_STORE, G_KEY_FILE_NONE, &error)) {
+        _NMLOG(LOGL_WARN, "get_stored_hash: cannot load cert store: %s", error->message);
+        return NULL;
+    }
+
+    hash = g_key_file_get_string(kf, uuid, "cert_hash", &error);
+    if (!hash)
+        _NMLOG(LOGL_DEBUG, "get_stored_hash: no cert_hash for uuid=%s: %s", uuid, error->message);
+
+    return hash;
+}
+
 /*****************************************************************************/
 /* CA cert from connection profile (CONFIGURED_CA path)                        */
 
