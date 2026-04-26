@@ -80,6 +80,9 @@ gboolean nm_supplicant_config_enable_pmf_akm(NMSupplicantConfig *self, GError **
 void     nm_supplicant_config_set_ap_isolation(NMSupplicantConfig *self, gboolean ap_isolation);
 gboolean nm_supplicant_config_get_ap_isolation(NMSupplicantConfig *self);
 
-void nm_supplicant_config_suppress_credentials_for_tofu(NMSupplicantConfig *self);
+void     nm_supplicant_config_suppress_credentials_for_tofu(NMSupplicantConfig *self);
+gboolean nm_supplicant_config_set_ca_cert_hash(NMSupplicantConfig *self,
+                                                const char         *hash_hex,
+                                                GError            **error);
 
 #endif /* __NETWORKMANAGER_SUPPLICANT_CONFIG_H__ */

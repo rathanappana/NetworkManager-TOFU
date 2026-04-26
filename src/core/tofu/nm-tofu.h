@@ -77,6 +77,7 @@ gboolean nm_tofu_is_uuid_trusted(const char *uuid);
 gboolean nm_tofu_is_cert_hash_trusted(const char *uuid,
                                        const char *observed_hash);
 void     nm_tofu_remove_server_cert_from_trusted(const char *uuid);
+char    *nm_tofu_get_stored_cert_hash(const char *uuid);
 
 /*****************************************************************************/
 /* CA cert from connection profile (CONFIGURED_CA path)                       */

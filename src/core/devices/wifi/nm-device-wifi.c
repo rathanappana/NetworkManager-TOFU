@@ -3701,6 +3701,22 @@ act_stage2_config(NMDevice *device, NMDeviceStateReason *out_failure_reason)
                     nm_tofu_set_session(NM_TOFU_SESSION_TYPE_CONFIGURED_CA, ssid_str, uuid);
                 } else if (nm_tofu_is_uuid_trusted(uuid)) {
                     nm_tofu_set_session(NM_TOFU_SESSION_TYPE_USER_TRUSTED_NO_CA, ssid_str, uuid);
+                    {
+                        gs_free char         *stored_hash = nm_tofu_get_stored_cert_hash(uuid);
+                        gs_free_error GError *hash_err    = NULL;
+
+                        if (stored_hash) {
+                            if (!nm_supplicant_config_set_ca_cert_hash(config, stored_hash, &hash_err))
+                                _LOGW(LOGD_WIFI,
+                                      "tofu: ca_cert hash inject failed for uuid=%s: %s",
+                                      uuid,
+                                      hash_err->message);
+                        } else {
+                            _LOGD(LOGD_WIFI,
+                                  "tofu: no stored hash for uuid=%s, skipping ca_cert pin",
+                                  uuid);
+                        }
+                    }
                 } else {
                     nm_tofu_set_session(NM_TOFU_SESSION_TYPE_TOFU, ssid_str, uuid);
                     nm_supplicant_config_suppress_credentials_for_tofu(config);
