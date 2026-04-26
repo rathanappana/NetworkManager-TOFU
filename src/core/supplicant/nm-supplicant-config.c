@@ -855,6 +855,35 @@ add_string_val(NMSupplicantConfig *self,
     return TRUE;
 }
 
+/*
+ * nm_supplicant_config_set_ca_cert_hash:
+ *
+ * Injects a wpa_supplicant hash://server/sha256/<hex> URI directly into the
+ * supplicant config as ca_cert.  Bypasses NM's cert scheme validation (which
+ * only accepts file://, pkcs11:, data:;base64,) and lets wpa_supplicant verify
+ * the leaf cert fingerprint natively via its hash:// URI handler.
+ */
+gboolean
+nm_supplicant_config_set_ca_cert_hash(NMSupplicantConfig *self,
+                                       const char         *hash_hex,
+                                       GError            **error)
+{
+    gs_free char *hash_uri = NULL;
+
+    g_return_val_if_fail(NM_IS_SUPPLICANT_CONFIG(self), FALSE);
+    g_return_val_if_fail(hash_hex && *hash_hex, FALSE);
+
+    hash_uri = g_strdup_printf("hash://server/sha256/%s", hash_hex);
+
+    if (!add_string_val(self, hash_uri, "ca_cert", FALSE, NULL, error))
+        return FALSE;
+
+    nm_log_info(LOGD_SUPPLICANT,
+                "tofu: injected ca_cert=hash://server/sha256/%.16s... for leaf cert pinning",
+                hash_hex);
+    return TRUE;
+}
+
 #define ADD_STRING_LIST_VAL(self,                                                         \
                             setting,                                                      \
                             setting_name,                                                 \
