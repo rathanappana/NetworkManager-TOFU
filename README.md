@@ -1,163 +1,176 @@
-NetworkManager
-==============
+# NetworkManager: Secure Trust On First Use (TOFU)
 
-Networking that Just Works
---------------------------
+![NetworkManager](https://img.shields.io/badge/NetworkManager-1.57.x--dev-blue)
+![Platform](https://img.shields.io/badge/Platform-Linux-lightgrey)
+![WiSec 2026](https://img.shields.io/badge/ACM-WiSec_2026-red)
 
-NetworkManager attempts to keep an active network connection available at all
-times.  The point of NetworkManager is to make networking configuration and
-setup as painless and automatic as possible.  NetworkManager is intended to
-replace default route, replace other routes, set IP addresses, and in general
-configure networking as NM sees fit (with the possibility of manual override as
-necessary).  In effect, the goal of NetworkManager is to make networking Just
-Work with a minimum of user hassle, but still allow customization and a high
-level of manual network control.  If you have special needs, we'd like to hear
-about them, but understand that NetworkManager is not intended for every
-use-case.
+This repository contains a prototype implementation of **Trust on First Use (TOFU)** for 802.1X Enterprise Wi-Fi networks in [NetworkManager](https://gitlab.freedesktop.org/NetworkManager/NetworkManager.git). 
 
-NetworkManager will attempt to keep every network device in the system up and
-active, as long as the device is available for use (has a cable plugged in,
-the killswitch isn't turned on, etc).  Network connections can be set to
-'autoconnect', meaning that NetworkManager will make that connection active
-whenever it and the hardware is available.
+**Read the full research paper:**  
+*[Secure Trust On First Use for Enterprise Wi-Fi](https://papers.mathyvanhoef.com/wisec2026.pdf)*  
+**Authors:** Rathan Appana & Mathy Vanhoef (Presented at ACM WiSec 2026)
 
-"Settings services" store lists of user- or administrator-defined "connections",
-which contain all the settings and parameters required to connect to a specific
-network.  NetworkManager will _never_ activate a connection that is not in this
-list, or that the user has not directed NetworkManager to connect to.
+## How it works
+TOFU framework implemented on NetworkManager.
+![Architecture Diagram](docs/images/tofu_architecture.png)
 
+When a user connects to a WPA-Enterprise (802.1X) network without a pre-configured CA certificate:
+1. **wpa_supplicant** initiates the TLS handshake and detects an untrusted certificate.
+2. **NetworkManager** intercepts this event instead of outright failing/continuing  the connection.
+3. NetworkManager extracts the certificate details (hash, issuer, subject) and pauses the authentication.
+4. Using the **D-Bus API**, NetworkManager queries the active GUI agent (e.g., `nm-applet` or GNOME Shell).
+5. The user is presented with a clear security prompt to verify the certificate fingerprint.
 
-How it works
-------------
+![TOFU Prompt Screenshot](docs/images/TOFU_on_eduroam_nm_applet.png)
 
-The NetworkManager daemon runs as a privileged service (since it must access
-and control hardware), but provides a D-Bus interface on the system bus to
-allow for fine-grained control of networking.
+If the user accepts, NetworkManager securely pins the certificate hash to the connection profile, protecting against future Evil Twin attacks.
 
-NetworkManager stores predefined network connections as connection profiles.
-The daemon manages these through its settings plugins: by default the
-distro-agnostic keyfile plugin under `/etc/NetworkManager/system-connections/`,
-with optional plugins for distro-specific formats (ifupdown).
-Profiles are exposed and edited over D-Bus.
+## Build and Installation Guide
 
-A variety of other system services are used by NetworkManager to provide
-network functionality: wpa_supplicant for wireless connections and 802.1x
-wired connections, pppd for PPP and mobile broadband connections, DHCP clients
-for dynamic IP addressing, dnsmasq for proxy nameserver and DHCP server
-functionality for internet connection sharing, and avahi-autoipd for IPv4
-link-local addresses.  Most communication with these daemons occurs, again,
-via D-Bus.
+This project is built for Debian-based systems (tested on Ubuntu 24.04 and 26.04), but apply similarly to other linux based distributions with some modifications.
 
+> <span style="color:red">**Prerequisite:** You must have source repositories (`deb-src`) enabled in your APT configuration (e.g., `/etc/apt/sources.list.d/ubuntu.sources`) to fetch NetworkManager's build dependencies.</span>
 
-How to use it
--------------
+### Option A: Quick Install (Recommended for Researchers/Testing)
+For artifact evaluation or quick setup, use the provided installation script. It will automatically install dependencies, compile the code, and restart the NetworkManager daemon.
 
-Install NetworkManager with your distribution's package manager.
+```bash
+git clone [https://github.com/rathanappana/NetworkManager-TOFU.git](https://github.com/rathanappana/NetworkManager-TOFU.git)
+cd NetworkManager-TOFU
+git checkout tofu
 
-As NetworkManager is actually a daemon that runs in the background, you need to
-use one of the many existing client programs to interact with it.
+# Give necessary permissions to installation script
+sudo chmod +x install_tofu.sh
 
-Terminal clients:
-- `nmcli`: advanced command line client that gives you full control over all the
-  aspects of NetworkManager, developed as part of the NetworkManager project.
-- `nmtui`: text-based user interface (TUI) client. Also for the terminal, but
-  interactive and more user friendly, also part of the NetworkManager project.
-- [`nmstate`][1]: declarative network API and command line tool that uses
-  NetworkManager as backend.
-- Ansible: use the [network-role][2] in your playbooks
+# Run the automated build and install script
+./install_tofu.sh
+```
 
-GUI clients
-- `nm-connection-editor` and `nm-applet`: basic GUI interfaces developed by
-  the NetworkManager project.
-- GNOME shell: interacts with NetworkManager via its default settings panel
-  `gnome-control-center`
-- KDE Plasma: interacts with NetworkManager via its default settings panel
-  and `plasma-nm`
+### Option B: Manual build (for developers)
+If you prefer to compile manually or are actively modifying the code:
 
+1. Install dependencies
+```bash
+sudo apt update
+sudo apt install meson ninja-build build-essential cmake libdbus-1-dev libbpf-dev libsystemd-dev libnss3-dev
+sudo apt build-dep network-manager
+```
+2. Configure and compile
+(Note: CLAT and NBFT are disabled to simplify dependencies on standard ubuntu builds)
+```bash
+git clone [https://github.com/rathanappana/NetworkManager-TOFU.git](https://github.com/rathanappana/NetworkManager-TOFU.git)
+cd NetworkManager-TOFU
+git checkout tofu
+meson setup build --prefix=/usr --sysconfdir=/etc --localstatedir=/var -Dclat=false -Dnbft=false
+ninja -C build
+```
+3. Install and apply changes
+```bash
+sudo ninja -C build install
+sudo systemctl daemon-reload
+sudo systemctl restart NetworkManager
+```
 
-Why doesn't my network Just Work?
----------------------------------
+## Debugging and logs
+To monitor how the TOFU flow is executing in real-time, view the NetworkManager logs:
+```bash
+sudo journalctl -u NetworkManager -f
+```
+Enable Advanced Debugging:
+If you need deeper insights into the Wi-Fi or 802.1X domains:
+```bash
+# View available logging domains
+nmcli general logging 
+# Enable DEBUG logging for ALL domains 
+sudo nmcli general logging level DEBUG domains ALL
+```
 
-Driver problems are the #1 cause of why NetworkManager sometimes fails to
-connect to wireless networks.  Often, the driver simply doesn't behave in a
-consistent manner, or is just plain buggy.  NetworkManager supports _only_
-those drivers that are shipped with the upstream Linux kernel, because only
-those drivers can be easily fixed and debugged.  ndiswrapper, vendor binary
-drivers, or other out-of-tree drivers may or may not work well with
-NetworkManager, precisely because they have not been vetted and improved by the
-open-source community, and because problems in these drivers usually cannot
-be fixed.
+## User Interfaces
 
-Sometimes, command-line tools like 'iwconfig' will work, but NetworkManager will
-fail.  This is again often due to buggy drivers, because these drivers simply
-aren't expecting the dynamic requests that NetworkManager and wpa_supplicant
-make.  Driver bugs should be filed in the bug tracker of the distribution being
-run, since often distributions customize their kernel and drivers.
+NetworkManager operates as a headless daemon. To configure the TOFU flag and interact with the certificate trust prompts, you must use a compatible front-end. We provide support for both terminal and graphical environments.
 
-Sometimes, it really is NetworkManager's fault.  If you think that's
-the case, please file a bug at:
+### TUI Integration `nmtui`
 
-https://gitlab.freedesktop.org/NetworkManager/NetworkManager/issues
+This repository includes modifications to NetworkManager's native text user interface, `nmtui`. Because it is built directly from this source tree, it is available immediately after installation without needing external repositories.
 
-Attaching NetworkManager debug logs from the journal (or wherever your
-distribution directs syslog's 'daemon' facility output, as
-/var/log/messages or /var/log/daemon.log) is often very helpful, and
-(if you can get) a working wpa_supplicant config file helps
-enormously.  See the logging section of file
-contrib/fedora/rpm/NetworkManager.conf for how to enable debug logging
-in NetworkManager.
+See [how to trigger TOFU](#how-to-trigger-and-test-tofu)
 
+1. Configuration: Open `nmtui` in your terminal, edit a WPA-Enterprise Wi-Fi connection, and check the newly added option to enable TOFU support.
 
-Requirements
-------------
+2. Prompting: When connecting to a network with an unknown certificate, nmtui presents a terminal-based pop-up displaying the certificate fingerprint, allowing you to accept or reject the connection.
 
-NetworkManager requires:
+### GUI Integration
 
-- Linux kernel >= 5.6 for some ethtool options (pause, eee, ring)
+For a standard desktop experience, we have modified the `nm-applet` GUI agent. Because graphical applets are maintained outside the core NetworkManager source tree, you must compile and run the modified applet separately to see native desktop TOFU dialogs.
 
+* **Modified NM-Applet (GUI):** [rathanappana/network-manager-applet-tofu](https://github.com/rathanappana/network-manager-applet-tofu)
 
-Documentation
--------------
+Make sure to run the modified `nm-applet` from the repository above to handle the TOFU D-Bus requests. (Support for GNOME Shell's native Wi-Fi dialogs is planned/in progress).
 
-Updated documentation can be found at https://networkmanager.dev/docs
+## How to trigger and test TOFU
 
-Users can consult the man pages. Most relevant pages for normal users are:
-- NetworkManager daemon: [`NetworkManager (8)`][3], [`NetworkManager.conf (5)`][4]
-- nmcli: [`nmcli (1)`][5], [`nmcli-examples (5)`][6], [`nm-settings-nmcli (5)`][7]
-- nmtui: [`nmtui (1)`][8]
+By default, TOFU is not globally enabled to maintain backward compatability with standard NetworkManager behaviour. you must explictly enable it for a specific 802.1X connection.
 
+### Option 1: Testing on a Real Enterprise Network
+If your are physically near an Enterprise networks such as Eduroam networks with a wifi chipset (From a Virtual machine you need a usb wifi though and to enable it via settings in virtual box or follow option 2)
 
-Get in touch
-------------
+1. Create or modify the Wi-Fi connection profile.
+2. Enable the TOFU flag using `nmcli`:
+```bash
+# Replace 'My_Enterprise_WiFi' with your actual connection name
+nmcli connection modify My_Enterprise_WiFi 802-1x.tofu yes
+```
+3. Attempt to connect. Because you haven't pinned a CA certificate, the NM itself pauses the connection whenever CA is not pinned and TOFU is enabled. and running `nm-applet` will prompt you to trust unknown certificate.
 
-To connect with the community, get help or get involved see the available
-communication channels at https://networkmanager.dev/community/
+### Option 2: Automated local simulation using `mac80211_hwsim`
 
-Report bugs or feature request in our [issue tracker](https://gitlab.freedesktop.org/NetworkManager/NetworkManager/-/issues).
-See [Report issues](https://gitlab.freedesktop.org/NetworkManager/NetworkManager/-/blob/main/CONTRIBUTING.md?ref_type=heads#report-issues)
-for details about how to do it.
+If you don't have access to a real Enterprise network, you can simulate one entirely in software using Linux's `mac80211_hwsim` kernel module. This creates virtual Wi-Fi interfaces that act like real hardware.
+
+We provide a script that automatically spins up a virtual Access Point with a self-signed certificate to trigger the TOFU flow locally.
 
 
-Contribute
-----------
-
-To get involved, see [CONTRIBUTING.md](CONTRIBUTING.md) to find different ways
-to contribute.
+> <span style="color:green">comming soon </span>
 
 
-License
--------
-
-NetworkManager is free software under GPL-2.0-or-later and LGPL-2.1-or-later.
-See [CONTRIBUTING.md#legal](CONTRIBUTING.md#legal) and
-[RELICENSE.md](RELICENSE.md) for details.
 
 
-[1]: https://nmstate.io/
-[2]: https://linux-system-roles.github.io/network/
-[3]: https://networkmanager.dev/docs/api/latest/NetworkManager.html
-[4]: https://networkmanager.dev/docs/api/latest/NetworkManager.conf.html
-[5]: https://networkmanager.dev/docs/api/latest/nmcli.html
-[6]: https://networkmanager.dev/docs/api/latest/nmcli-examples.html
-[7]: https://networkmanager.dev/docs/api/latest/nm-settings-nmcli.html
-[8]: https://networkmanager.dev/docs/api/latest/nmtui.html
+## Repository workflow (for contributors)
+To keep this implementation "upstream-friendly", we maintain a specific git workflow separating upstream tracking from our TOFU features.
+
+1. `main` branch: Mirrors the upstream NetworkManager repository.
+2. `tofu` branch: Contains the TOFU implementation, actively rebased on top of `main`.
+
+To update the code with the latest upstream changes:
+```bash
+git add remote upstream https://gitlab.freedesktop.org/NetworkManager/NetworkManager.git 
+# 1. Fetch upstream changes
+git fetch upstream
+
+# 2. Update the main branch
+git checkout main
+git pull upstream main
+
+# 3. Rebase the TOFU branch
+git checkout tofu
+git rebase main
+
+# (Resolve conflicts if any occur, then run: git rebase --continue)
+
+# 4. Push updated TOFU branch to your fork
+git push origin tofu --force
+```
+
+## Authors & Citation
+
+This feature was developed by Rathan Appana as part of research conducted with Mathy Vanhoef.
+
+If you use this code in your research, please cite our WiSec 2026 paper:
+Code snippet.
+```tex
+@inproceedings{appana2026tofu,
+  title={Secure Trust On First Use for Enterprise Wi-Fi},
+  author={Appana, Rathan and Vanhoef, Mathy},
+  booktitle={Proceedings of the 19th ACM Conference on Security and Privacy in Wireless and Mobile Networks (WiSec '26)},
+  year={2026}
+}
+```
