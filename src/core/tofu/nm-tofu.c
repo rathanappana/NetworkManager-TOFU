@@ -489,14 +489,14 @@ tofu_verify_leaf_cert_with_config_ca(const char        *ssid,
                                       NMTOFUCertSession *config_session,
                                       NMTOFUCertSession *observed_session)
 {
-    NMTOFUCertInfo    *config_ca = NULL;
-    NMTOFUCertInfo    *leaf      = NULL;
-    gnutls_x509_crt_t  crt_leaf, crt_ca;
-    gnutls_datum_t     d_leaf, d_ca;
-    gnutls_x509_crt_t  ca_list[1];
-    unsigned int       verify = 0;
-    int                ret;
-    guint              i;
+    NMTOFUCertInfo           *config_ca = NULL;
+    NMTOFUCertInfo           *leaf      = NULL;
+    gnutls_x509_crt_t         crt_leaf;
+    gnutls_datum_t            d_leaf, d_ca;
+    gnutls_x509_trust_list_t  trust = NULL;
+    unsigned int              verify = 0;
+    int                       ret;
+    guint                     i;
 
     _NMLOG(LOGL_INFO, "CONFIGURED_CA: verifying leaf cert for SSID=%s", ssid);
 
@@ -542,21 +542,40 @@ tofu_verify_leaf_cert_with_config_ca(const char        *ssid,
     d_ca.size   = g_bytes_get_size(config_ca->cert_data);
 
     gnutls_x509_crt_init(&crt_leaf);
-    gnutls_x509_crt_init(&crt_ca);
 
-    if (gnutls_x509_crt_import(crt_leaf, &d_leaf, GNUTLS_X509_FMT_DER) != GNUTLS_E_SUCCESS
-        || gnutls_x509_crt_import(crt_ca, &d_ca, GNUTLS_X509_FMT_PEM) != GNUTLS_E_SUCCESS) {
-        _NMLOG(LOGL_WARN, "CONFIGURED_CA: cert parse failed for SSID=%s", ssid);
+    if (gnutls_x509_crt_import(crt_leaf, &d_leaf, GNUTLS_X509_FMT_DER) != GNUTLS_E_SUCCESS) {
+        _NMLOG(LOGL_WARN, "CONFIGURED_CA: leaf cert parse failed for SSID=%s", ssid);
         gnutls_x509_crt_deinit(crt_leaf);
-        gnutls_x509_crt_deinit(crt_ca);
         return;
     }
 
-    ca_list[0] = crt_ca;
-    ret        = gnutls_x509_crt_verify(crt_leaf, ca_list, 1, 0, &verify);
+    /* config_ca->cert_data holds the whole saved ca-cert-<uuid>.pem file,
+     * which can (and for a real chain, must) contain several concatenated
+     * certs: every intermediate NM observed plus whatever the system trust
+     * store found above it. A single gnutls_x509_crt_t can only hold one of
+     * those, so load them all as trust anchors and let GnuTLS itself walk
+     * from the leaf up to whichever one actually signed it, instead of
+     * requiring the leaf to be signed directly by just the first cert in
+     * the file. */
+    ret = gnutls_x509_trust_list_init(&trust, 0);
+    if (ret < 0) {
+        _NMLOG(LOGL_WARN, "CONFIGURED_CA: trust list init failed for SSID=%s", ssid);
+        gnutls_x509_crt_deinit(crt_leaf);
+        return;
+    }
 
+    ret = gnutls_x509_trust_list_add_trust_mem(trust, &d_ca, NULL, GNUTLS_X509_FMT_PEM, 0, 0);
+    if (ret <= 0) {
+        _NMLOG(LOGL_WARN, "CONFIGURED_CA: no usable CA cert in pinned file for SSID=%s", ssid);
+        gnutls_x509_trust_list_deinit(trust, 1);
+        gnutls_x509_crt_deinit(crt_leaf);
+        return;
+    }
+
+    ret = gnutls_x509_trust_list_verify_crt(trust, &crt_leaf, 1, 0, &verify, NULL);
+
+    gnutls_x509_trust_list_deinit(trust, 1);
     gnutls_x509_crt_deinit(crt_leaf);
-    gnutls_x509_crt_deinit(crt_ca);
 
     if (ret < 0 || verify != 0) {
         NMDBusManager   *dbus_mgr;
@@ -583,85 +602,113 @@ tofu_verify_leaf_cert_with_config_ca(const char        *ssid,
 /* Connection management helpers (all static — only called within this file)   */
 
 /*
- * Save the pinned CA cert plus any issuers found in the system trust store as
- * a concatenated PEM file in TOFU_CERT_DIR.  The full chain (e.g. intermediate +
- * root) lets OpenSSL in wpa_supplicant complete verification even when
- * the root is not separately installed on the device.  Returns owned path.
+ * Save every observed non-leaf cert (all intermediates plus whatever the AP
+ * sent as root) as a concatenated PEM file in TOFU_CERT_DIR, then extend it
+ * further via the system trust store from the highest-depth observed cert,
+ * appending issuers until a self-signed root or the store has no more.
+ * Previously this only saved the single highest-depth observed cert
+ * (typically the root), silently dropping any intermediate(s) between it
+ * and the leaf — which then made leaf verification against the saved file
+ * fail for any chain that isn't leaf-signed-directly-by-root.  Returns
+ * owned path.
  */
 static char *
-tofu_save_cert_chain_as_pem(NMTOFUCertInfo *cert, GError **error)
+tofu_save_cert_chain_as_pem(NMTOFUCertSession *observed_session, GError **error)
 {
-    gnutls_x509_crt_t        crt;
-    gnutls_datum_t           datum;
-    gnutls_x509_trust_list_t trust_list = NULL;
-    GString                 *pem_out    = g_string_new(NULL);
-    gs_free char            *path       = NULL;
-    const guint8            *raw;
-    gsize                    raw_len;
-    int                      rc;
+    GString        *pem_out = g_string_new(NULL);
+    NMTOFUCertInfo *top     = NULL;
+    gs_free char   *path    = NULL;
+    guint           i;
 
-    g_return_val_if_fail(cert && cert->cert_data, NULL);
+    g_return_val_if_fail(observed_session && observed_session->certs, NULL);
 
-    raw   = g_bytes_get_data(cert->cert_data, &raw_len);
-    datum = (gnutls_datum_t){.data = (unsigned char *) raw, .size = (unsigned int) raw_len};
+    for (i = 0; i < observed_session->certs->len; i++) {
+        NMTOFUCertInfo    *info = g_ptr_array_index(observed_session->certs, i);
+        gnutls_x509_crt_t  crt;
+        gnutls_datum_t     datum, pem_datum = {};
+        const guint8      *raw;
+        gsize              raw_len;
 
-    gnutls_x509_crt_init(&crt);
-    if (gnutls_x509_crt_import(crt, &datum, GNUTLS_X509_FMT_DER) < 0) {
-        g_set_error(error, G_IO_ERROR, G_IO_ERROR_FAILED, "failed to import pinned cert DER");
-        gnutls_x509_crt_deinit(crt);
-        g_string_free(pem_out, TRUE);
-        return NULL;
-    }
+        if (!info || info->depth == 0 || !info->cert_data)
+            continue;
 
-    /* First block: the pinned cert itself (e.g. GEANT intermediate). */
-    {
-        gnutls_datum_t pem_datum = {};
+        raw   = g_bytes_get_data(info->cert_data, &raw_len);
+        datum = (gnutls_datum_t){.data = (unsigned char *) raw, .size = (unsigned int) raw_len};
 
-        rc = gnutls_x509_crt_export2(crt, GNUTLS_X509_FMT_PEM, &pem_datum);
-        if (rc == GNUTLS_E_SUCCESS) {
+        gnutls_x509_crt_init(&crt);
+        if (gnutls_x509_crt_import(crt, &datum, GNUTLS_X509_FMT_DER) == GNUTLS_E_SUCCESS
+            && gnutls_x509_crt_export2(crt, GNUTLS_X509_FMT_PEM, &pem_datum) == GNUTLS_E_SUCCESS) {
             g_string_append_len(pem_out, (char *) pem_datum.data, (gssize) pem_datum.size);
             gnutls_free(pem_datum.data);
         }
+        gnutls_x509_crt_deinit(crt);
+
+        if (!top || info->depth > top->depth)
+            top = info;
     }
 
-    /* Walk up the chain via the system trust store, appending each issuer
-     * until we reach a self-signed root or the store has no more issuers. */
-    gnutls_x509_trust_list_init(&trust_list, 0);
-    if (gnutls_x509_trust_list_add_system_trust(trust_list, 0, 0) > 0) {
-        gnutls_x509_crt_t current = crt;
-        int               depth   = 0;
-
-        while (depth < 10 && !gnutls_x509_crt_check_issuer(current, current)) {
-            gnutls_x509_crt_t issuer = NULL;
-            gnutls_datum_t    pem_datum = {};
-
-            rc = gnutls_x509_trust_list_get_issuer(trust_list, current, &issuer,
-                                                    GNUTLS_TL_GET_COPY);
-            if (rc != GNUTLS_E_SUCCESS || !issuer)
-                break;
-
-            rc = gnutls_x509_crt_export2(issuer, GNUTLS_X509_FMT_PEM, &pem_datum);
-            if (rc == GNUTLS_E_SUCCESS) {
-                g_string_append_len(pem_out, (char *) pem_datum.data, (gssize) pem_datum.size);
-                gnutls_free(pem_datum.data);
-            }
-
-            if (current != crt)
-                gnutls_x509_crt_deinit(current);
-            current = issuer;
-            depth++;
-        }
-
-        if (current != crt)
-            gnutls_x509_crt_deinit(current);
-    }
-    gnutls_x509_trust_list_deinit(trust_list, 0);
-    gnutls_x509_crt_deinit(crt);
-
-    if (pem_out->len == 0) {
-        g_set_error(error, G_IO_ERROR, G_IO_ERROR_FAILED, "PEM export produced empty output");
+    if (pem_out->len == 0 || !top) {
+        g_set_error(error,
+                    G_IO_ERROR,
+                    G_IO_ERROR_FAILED,
+                    "no non-leaf certs observed to save");
         g_string_free(pem_out, TRUE);
         return NULL;
+    }
+
+    /* Walk up further via the system trust store from the highest-depth
+     * observed cert, appending each issuer until we reach a self-signed
+     * root or the store has no more issuers — completes the chain when the
+     * AP itself didn't send the actual root. */
+    {
+        gnutls_x509_crt_t        top_crt;
+        gnutls_datum_t           top_datum;
+        gnutls_x509_trust_list_t trust_list = NULL;
+        const guint8             *raw;
+        gsize                     raw_len;
+
+        raw       = g_bytes_get_data(top->cert_data, &raw_len);
+        top_datum = (gnutls_datum_t){.data = (unsigned char *) raw, .size = (unsigned int) raw_len};
+
+        gnutls_x509_crt_init(&top_crt);
+        if (gnutls_x509_crt_import(top_crt, &top_datum, GNUTLS_X509_FMT_DER) == GNUTLS_E_SUCCESS) {
+            gnutls_x509_trust_list_init(&trust_list, 0);
+            if (gnutls_x509_trust_list_add_system_trust(trust_list, 0, 0) > 0) {
+                gnutls_x509_crt_t current = top_crt;
+                int               depth   = 0;
+
+                while (depth < 10 && !gnutls_x509_crt_check_issuer(current, current)) {
+                    gnutls_x509_crt_t issuer    = NULL;
+                    gnutls_datum_t    pem_datum = {};
+                    int               rc;
+
+                    rc = gnutls_x509_trust_list_get_issuer(trust_list,
+                                                            current,
+                                                            &issuer,
+                                                            GNUTLS_TL_GET_COPY);
+                    if (rc != GNUTLS_E_SUCCESS || !issuer)
+                        break;
+
+                    rc = gnutls_x509_crt_export2(issuer, GNUTLS_X509_FMT_PEM, &pem_datum);
+                    if (rc == GNUTLS_E_SUCCESS) {
+                        g_string_append_len(pem_out,
+                                            (char *) pem_datum.data,
+                                            (gssize) pem_datum.size);
+                        gnutls_free(pem_datum.data);
+                    }
+
+                    if (current != top_crt)
+                        gnutls_x509_crt_deinit(current);
+                    current = issuer;
+                    depth++;
+                }
+
+                if (current != top_crt)
+                    gnutls_x509_crt_deinit(current);
+            }
+            gnutls_x509_trust_list_deinit(trust_list, 0);
+        }
+        gnutls_x509_crt_deinit(top_crt);
     }
 
     g_mkdir_with_parents(TOFU_CERT_DIR, 0700);
@@ -938,27 +985,18 @@ tofu_add_timestamp_to_connection(const char *ssid)
 static void
 tofu_update_ca_cert(const char *ssid)
 {
-    NMTOFUCertInfo       *ca_cert = NULL;
     gs_free char         *pem_path = NULL;
     gs_free_error GError *error = NULL;
     NMSettings           *settings;
     NMSettingsConnection *const *conns;
-    guint                 n, i, j;
+    guint                 n, i;
 
     if (!s_observed_certs || !s_observed_certs->certs || s_observed_certs->certs->len == 0) {
         _NMLOG(LOGL_WARN, "update-ca-cert: no certs in session");
         return;
     }
 
-    /* Pick the highest-depth cert — that is the root CA. */
-    for (j = 0; j < s_observed_certs->certs->len; j++) {
-        NMTOFUCertInfo *info = g_ptr_array_index(s_observed_certs->certs, j);
-
-        if (!ca_cert || info->depth > ca_cert->depth)
-            ca_cert = info;
-    }
-
-    pem_path = tofu_save_cert_chain_as_pem(ca_cert, &error);
+    pem_path = tofu_save_cert_chain_as_pem(s_observed_certs, &error);
     if (!pem_path) {
         _NMLOG(LOGL_WARN, "update-ca-cert: PEM export failed: %s", error->message);
         return;
