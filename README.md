@@ -126,13 +126,7 @@ nmcli connection modify My_Enterprise_WiFi 802-1x.tofu yes
 
 If you don't have access to a real Enterprise network, you can simulate one entirely in software using Linux's `mac80211_hwsim` kernel module. This creates virtual Wi-Fi interfaces that act like real hardware.
 
-We provide a script that automatically spins up a virtual Access Point with a self-signed certificate to trigger the TOFU flow locally.
-
-
-> <span style="color:green">comming soon </span>
-
-
-
+We provide a script `simulate-tofu.sh` that automatically spins up a virtual Access Point with a self-signed certificate to trigger the TOFU flow locally using `mac80211_hwsim`.
 
 ## Repository workflow (for contributors)
 To keep this implementation "upstream-friendly", we maintain a specific git workflow separating upstream tracking from our TOFU features.
