@@ -1814,6 +1814,22 @@ cert_parser(KeyfileReaderInfo *info, NMSetting *setting, const char *key)
         return;
     }
 
+    if (HAS_SCHEME_PREFIX(bin, bin_len, NM_KEYFILE_CERT_SCHEME_PREFIX_SERVER_HASH)) {
+        if (nm_setting_802_1x_check_cert_scheme(bin, bin_len, NULL)
+            != NM_SETTING_802_1X_CK_SCHEME_SERVER_HASH) {
+            read_handle_warn(info,
+                             key,
+                             key,
+                             NM_KEYFILE_WARN_SEVERITY_WARN,
+                             _("invalid server hash URI \"%s\""),
+                             bin);
+            return;
+        }
+
+        g_object_set(setting, key, bytes, NULL);
+        return;
+    }
+
     if (HAS_SCHEME_PREFIX(bin, bin_len, NM_KEYFILE_CERT_SCHEME_PREFIX_BLOB)) {
         const char     *cdata       = bin + NM_STRLEN(NM_KEYFILE_CERT_SCHEME_PREFIX_BLOB);
         gsize           cdata_len   = bin_len - NM_STRLEN(NM_KEYFILE_CERT_SCHEME_PREFIX_BLOB) - 1;
@@ -2909,6 +2925,11 @@ cert_writer_default(NMConnection                     *connection,
 
         nm_keyfile_plugin_kf_set_string(file, setting_name, vtable->setting_key, val);
     } else if (scheme == NM_SETTING_802_1X_CK_SCHEME_PKCS11) {
+        nm_keyfile_plugin_kf_set_string(file,
+                                        setting_name,
+                                        vtable->setting_key,
+                                        vtable->uri_func(setting));
+    } else if (scheme == NM_SETTING_802_1X_CK_SCHEME_SERVER_HASH) {
         nm_keyfile_plugin_kf_set_string(file,
                                         setting_name,
                                         vtable->setting_key,
