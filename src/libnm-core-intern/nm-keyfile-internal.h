@@ -25,6 +25,7 @@
 #define NM_KEYFILE_CERT_SCHEME_PREFIX_PATH   "file://"
 #define NM_KEYFILE_CERT_SCHEME_PREFIX_PKCS11 "pkcs11:"
 #define NM_KEYFILE_CERT_SCHEME_PREFIX_BLOB   "data:;base64,"
+#define NM_KEYFILE_CERT_SCHEME_PREFIX_SERVER_HASH "hash://"
 
 char *nm_keyfile_detect_unqualified_path_scheme(const char   *base_dir,
                                                 gconstpointer pdata,

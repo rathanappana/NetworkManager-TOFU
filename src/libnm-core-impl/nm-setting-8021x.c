@@ -252,6 +252,12 @@ nm_setting_802_1x_check_cert_scheme(gconstpointer pdata, gsize length, GError **
                           NM_STRLEN(NM_SETTING_802_1X_CERT_SCHEME_PREFIX_PKCS11))) {
         scheme        = NM_SETTING_802_1X_CK_SCHEME_PKCS11;
         prefix_length = NM_STRLEN(NM_SETTING_802_1X_CERT_SCHEME_PREFIX_PKCS11);
+    } else if (length >= NM_STRLEN(NM_SETTING_802_1X_CERT_SCHEME_PREFIX_SERVER_HASH)
+               && !memcmp(data,
+                          NM_SETTING_802_1X_CERT_SCHEME_PREFIX_SERVER_HASH,
+                          NM_STRLEN(NM_SETTING_802_1X_CERT_SCHEME_PREFIX_SERVER_HASH))) {
+        scheme        = NM_SETTING_802_1X_CK_SCHEME_SERVER_HASH;
+        prefix_length = NM_STRLEN(NM_SETTING_802_1X_CERT_SCHEME_PREFIX_SERVER_HASH);
     } else {
         scheme        = NM_SETTING_802_1X_CK_SCHEME_BLOB;
         prefix_length = 0;
@@ -354,6 +360,9 @@ _nm_setting_802_1x_cert_value_to_bytes(NMSetting8021xCKScheme scheme,
 
     switch (scheme) {
     case NM_SETTING_802_1X_CK_SCHEME_PKCS11:
+    case NM_SETTING_802_1X_CK_SCHEME_SERVER_HASH:
+        /* Both are opaque URIs passed straight through to wpa_supplicant,
+         * unlike PATH which prepends a scheme prefix onto a bare value. */
         if (val_len < 0)
             val_len = strlen((char *) val_bin) + 1;
 
@@ -458,17 +467,23 @@ _cert_get_path(GBytes *bytes)
     }                                                                       \
     G_STMT_END
 
+/* PKCS11 URIs and server-hash pins are stored as-is, unlike PATH values. */
 #define _cert_impl_get_uri(setting, cert_field)                               \
     G_STMT_START                                                              \
     {                                                                         \
         NMSetting8021x *const _setting = (setting);                           \
         GBytes               *_cert;                                          \
+        NMSetting8021xCKScheme _scheme;                                       \
                                                                               \
         g_return_val_if_fail(NM_IS_SETTING_802_1X(_setting), NULL);           \
                                                                               \
         _cert = NM_SETTING_802_1X_GET_PRIVATE(_setting)->cert_field;          \
                                                                               \
-        _cert_assert_scheme(_cert, NM_SETTING_802_1X_CK_SCHEME_PKCS11, NULL); \
+        _scheme = _nm_setting_802_1x_cert_get_scheme(_cert, NULL);            \
+        g_return_val_if_fail(NM_IN_SET(_scheme,                               \
+                                       NM_SETTING_802_1X_CK_SCHEME_PKCS11,    \
+                                       NM_SETTING_802_1X_CK_SCHEME_SERVER_HASH), \
+                             NULL);                                           \
                                                                               \
         return g_bytes_get_data(_cert, NULL);                                 \
     }                                                                         \
@@ -500,8 +515,32 @@ _cert_impl_set(NMSetting8021x         *setting,
         g_return_val_if_fail(NM_IN_SET(scheme,
                                        NM_SETTING_802_1X_CK_SCHEME_BLOB,
                                        NM_SETTING_802_1X_CK_SCHEME_PATH,
-                                       NM_SETTING_802_1X_CK_SCHEME_PKCS11),
+                                       NM_SETTING_802_1X_CK_SCHEME_PKCS11,
+                                       NM_SETTING_802_1X_CK_SCHEME_SERVER_HASH),
                              FALSE);
+        /* SERVER_HASH is only meaningful for a CA certificate — it pins the
+         * leaf cert's fingerprint in place of a CA chain check. Reject it
+         * outright for private keys / client certs instead of silently
+         * storing an opaque "hash://..." string where real key/cert bytes
+         * are expected (this property's switch below has no format check
+         * that would otherwise catch that).
+         *
+         * Permitted for both PROP_CA_CERT and PROP_PHASE2_CA_CERT: wpa_supplicant's
+         * own docs only describe hash:// under ca_cert, not ca_cert2, but
+         * config.c stores both via the identical STRe field type, and
+         * eap_tls_common.c's eap_tls_params_from_conf2() feeds phase2_cert
+         * through the same eap_tls_cert_params_from_conf() /
+         * tls_connection_ca_cert() path used for phase1 (verified against
+         * wpa_supplicant 2.11 source directly, not assumed from docs). */
+        if (scheme == NM_SETTING_802_1X_CK_SCHEME_SERVER_HASH
+            && !NM_IN_SET(property, PROP_CA_CERT, PROP_PHASE2_CA_CERT)) {
+            g_set_error_literal(
+                error,
+                NM_CONNECTION_ERROR,
+                NM_CONNECTION_ERROR_INVALID_PROPERTY,
+                _("the server-hash certificate scheme is only valid for a CA certificate"));
+            return FALSE;
+        }
     }
 
     if (!value) {
@@ -513,7 +552,12 @@ _cert_impl_set(NMSetting8021x         *setting,
 
     if (!value) {
         /* pass. */
-    } else if (scheme == NM_SETTING_802_1X_CK_SCHEME_PKCS11) {
+    } else if (NM_IN_SET(scheme,
+                         NM_SETTING_802_1X_CK_SCHEME_PKCS11,
+                         NM_SETTING_802_1X_CK_SCHEME_SERVER_HASH)) {
+        /* Opaque URI, passed straight through to wpa_supplicant — unlike
+         * PATH below, never read from disk (a "hash://..." value is not a
+         * real file). */
         cert = _nm_setting_802_1x_cert_value_to_bytes(scheme, (guint8 *) value, -1, error);
         if (!cert)
             goto err;
@@ -553,7 +597,10 @@ _cert_impl_set(NMSetting8021x         *setting,
     switch (property) {
     case PROP_CA_CERT:
     case PROP_PHASE2_CA_CERT:
-        if (value && scheme != NM_SETTING_802_1X_CK_SCHEME_PKCS11
+        if (value
+            && !NM_IN_SET(scheme,
+                         NM_SETTING_802_1X_CK_SCHEME_PKCS11,
+                         NM_SETTING_802_1X_CK_SCHEME_SERVER_HASH)
             && format != NM_CRYPTO_FILE_FORMAT_X509) {
             /* wpa_supplicant can only use raw x509 CA certs */
             g_set_error_literal(error,
@@ -959,7 +1006,8 @@ nm_setting_802_1x_get_system_ca_certs(NMSetting8021x *setting)
  * Returns the scheme used to store the CA certificate.  If the returned scheme
  * is %NM_SETTING_802_1X_CK_SCHEME_BLOB, use nm_setting_802_1x_get_ca_cert_blob();
  * if %NM_SETTING_802_1X_CK_SCHEME_PATH, use nm_setting_802_1x_get_ca_cert_path();
- * if %NM_SETTING_802_1X_CK_SCHEME_PKCS11, use nm_setting_802_1x_get_ca_cert_uri().
+ * if %NM_SETTING_802_1X_CK_SCHEME_PKCS11 or %NM_SETTING_802_1X_CK_SCHEME_SERVER_HASH,
+ * use nm_setting_802_1x_get_ca_cert_uri().
  *
  * Returns: scheme used to store the CA certificate (blob or path)
  **/
@@ -1016,8 +1064,8 @@ nm_setting_802_1x_get_ca_cert_path(NMSetting8021x *setting)
  * nm_setting_802_1x_get_ca_cert_path().
  *
  * Currently, it's limited to PKCS#11 URIs ('pkcs11' scheme as defined by RFC
- * 7512), but may be extended to other schemes in future (such as 'file' URIs
- * for local files and 'data' URIs for inline certificate data).
+ * 7512) and, since, wpa_supplicant's native leaf-certificate pin syntax
+ * ('hash' scheme, "hash://server/sha256/<hex>")
  *
  * Returns: the URI string
  *
@@ -1035,8 +1083,10 @@ nm_setting_802_1x_get_ca_cert_uri(NMSetting8021x *setting)
  * @value: when @scheme is set to either %NM_SETTING_802_1X_CK_SCHEME_PATH
  *   or %NM_SETTING_802_1X_CK_SCHEME_BLOB, pass the path of the CA certificate
  *   file (PEM or DER format).  The path must be UTF-8 encoded; use
- *   g_filename_to_utf8() to convert if needed.  Passing %NULL with any @scheme
- *   clears the CA certificate.
+ *   g_filename_to_utf8() to convert if needed. When @scheme is
+ *   %NM_SETTING_802_1X_CK_SCHEME_SERVER_HASH, pass the full
+ *   "hash://server/sha256/<hex>" URI instead — no file is read for
+ *   that scheme. Passing %NULL with any @scheme clears the CA certificate.
  * @scheme: desired storage scheme for the certificate
  * @out_format: on successful return, the type of the certificate added
  * @error: on unsuccessful return, an error
@@ -1044,7 +1094,10 @@ nm_setting_802_1x_get_ca_cert_uri(NMSetting8021x *setting)
  * Reads a certificate from disk and sets the #NMSetting8021x:ca-cert property
  * with the raw certificate data if using the %NM_SETTING_802_1X_CK_SCHEME_BLOB
  * scheme, or with the path to the certificate file if using the
- * %NM_SETTING_802_1X_CK_SCHEME_PATH scheme.
+ * %NM_SETTING_802_1X_CK_SCHEME_PATH scheme. With
+ * %NM_SETTING_802_1X_CK_SCHEME_SERVER_HASH, @value is stored verbatim as an
+ * opaque URI, same as %NM_SETTING_802_1X_CK_SCHEME_PKCS11 — nothing is read
+ * from disk.
  *
  * Returns: %TRUE if the operation succeeded, %FALSE if it was unsuccessful
  **/
