@@ -8,13 +8,13 @@
  *
  * Stages:
  *   1. Detection  - nm-device-wifi.c detects EAP connection with
- *                   ca-verify-mode=tofu and no CA cert; calls
- *                   nm_tofu_set_session() (wired in commit 9).
+ *                   ca-verify-mode=tofu; calls nm_tofu_set_session().
  *   2. Collection - nm_tofu_stage2_cert_signal() accumulates certificates
- *                   from wpa_supplicant's Certification D-Bus signal
- *                   (wired in commit 8).
- *   3. Dispatch   - On leaf cert (depth==0): verify against system CAs,
- *                   parse cert fields, call registered CertificateAgent.
+ *                   from wpa_supplicant's Certification D-Bus signal.
+ *   3. Dispatch   - On leaf cert (depth==0): parse cert fields, call
+ *                   registered CertificateAgent. NM does not independently
+ *                   verify the chain here — wpa_supplicant's own TLS stack
+ *                   already did, and is the sole authority on that.
  *   4. Response   - tofu_on_agent_response() handles accept/reject from
  *                   the agent UI; pins cert or removes profile.
  */
@@ -54,7 +54,6 @@ static NMTOFUSessionType  s_session_type   = NM_TOFU_SESSION_TYPE_DEFAULT;
 static char              *s_ssid           = NULL;
 static char              *s_uuid           = NULL;
 static NMTOFUCertSession *s_observed_certs = NULL; /* certs from wpa_supplicant */
-static NMTOFUCertSession *s_config_cert    = NULL; /* CA cert from connection profile */
 
 /*****************************************************************************/
 /* NMTOFUCertInfo / NMTOFUCertSession lifetime                                */
@@ -129,7 +128,6 @@ nm_tofu_reset_session(void)
         return;
 
     nm_clear_pointer(&s_observed_certs, cert_session_free);
-    nm_clear_pointer(&s_config_cert, cert_session_free);
     nm_clear_g_free(&s_ssid);
     nm_clear_g_free(&s_uuid);
     s_session_type = NM_TOFU_SESSION_TYPE_DEFAULT;
@@ -179,7 +177,7 @@ nm_tofu_mark_server_cert_as_trusted(const char *uuid, const char *cert_hash)
 }
 
 gboolean
-nm_tofu_is_uuid_trusted(const char *uuid)
+nm_tofu_has_pinned_leaf_hash(const char *uuid)
 {
     nm_auto_unref_keyfile GKeyFile *kf    = NULL;
     gs_free_error GError           *error = NULL;
@@ -300,47 +298,6 @@ nm_tofu_get_stored_cert_hash(const char *uuid)
 }
 
 /*****************************************************************************/
-/* CA cert from connection profile (CONFIGURED_CA path)                        */
-
-void
-nm_tofu_save_config_ca_cert_data(GBytes *cert_data)
-{
-    NMTOFUCertInfo *info;
-
-    g_return_if_fail(cert_data);
-
-    nm_clear_pointer(&s_config_cert, cert_session_free);
-    s_config_cert = cert_session_new();
-
-    info            = g_new0(NMTOFUCertInfo, 1);
-    info->cert_data = g_bytes_ref(cert_data);
-    g_ptr_array_add(s_config_cert->certs, info);
-    s_config_cert->finalized = TRUE;
-
-    _NMLOG(LOGL_DEBUG, "saved config CA cert (%zu bytes)", g_bytes_get_size(cert_data));
-}
-
-static void
-tofu_load_config_ca_from_file(const char *pem_path)
-{
-    gs_free char         *pem_data = NULL;
-    gsize                 pem_len  = 0;
-    gs_free_error GError *error    = NULL;
-    GBytes               *bytes;
-
-    g_return_if_fail(pem_path && *pem_path);
-
-    if (!g_file_get_contents(pem_path, &pem_data, &pem_len, &error)) {
-        _NMLOG(LOGL_WARN, "load_config_ca: cannot read %s: %s", pem_path, error->message);
-        return;
-    }
-
-    bytes = g_bytes_new_take(g_steal_pointer(&pem_data), pem_len);
-    nm_tofu_save_config_ca_cert_data(bytes);
-    g_bytes_unref(bytes);
-}
-
-/*****************************************************************************/
 /* GnuTLS helpers (static — internal to this module)                          */
 
 /*
@@ -405,198 +362,9 @@ extract_san_dnsnames(GBytes *cert_data)
     return names;
 }
 
-/*****************************************************************************/
-/* Cert verification (static — called only from within this module)            */
-
-/*
- * Verify the leaf cert (depth==0) in @session against the system CA bundle.
- * Returns: 1 = trusted, 0 = not trusted, negative = error.
- */
-static int
-tofu_verify_leaf_cert_with_system_ca(NMTOFUCertSession *session)
-{
-    NMTOFUCertInfo           *leaf = NULL;
-    gnutls_x509_crt_t         crt;
-    gnutls_datum_t             datum;
-    gnutls_x509_trust_list_t   trust;
-    unsigned int               verify;
-    int                        ret;
-    guint                      i;
-
-    if (!session || !session->certs)
-        return -10;
-
-    for (i = 0; i < session->certs->len; i++) {
-        NMTOFUCertInfo *info = g_ptr_array_index(session->certs, i);
-
-        if (info && info->depth == 0) {
-            leaf = info;
-            break;
-        }
-    }
-    if (!leaf || !leaf->cert_data)
-        return -9;
-
-    datum.data = (unsigned char *) g_bytes_get_data(leaf->cert_data, NULL);
-    datum.size = g_bytes_get_size(leaf->cert_data);
-    if (!datum.data || datum.size == 0)
-        return -8;
-
-    ret = gnutls_x509_crt_init(&crt);
-    if (ret < 0)
-        return -7;
-
-    ret = gnutls_x509_crt_import(crt, &datum, GNUTLS_X509_FMT_DER);
-    if (ret < 0) {
-        gnutls_x509_crt_deinit(crt);
-        return -6;
-    }
-
-    ret = gnutls_x509_trust_list_init(&trust, 0);
-    if (ret < 0) {
-        gnutls_x509_crt_deinit(crt);
-        return -5;
-    }
-
-    ret = gnutls_x509_trust_list_add_system_trust(trust, 0, 0);
-    if (ret < 0) {
-        gnutls_x509_trust_list_deinit(trust, 1);
-        gnutls_x509_crt_deinit(crt);
-        return -4;
-    }
-
-    ret = gnutls_x509_trust_list_verify_crt(trust, &crt, 1, 0, &verify, NULL);
-    gnutls_x509_trust_list_deinit(trust, 1);
-    gnutls_x509_crt_deinit(crt);
-
-    if (ret < 0)
-        return -3;
-
-    return (verify == 0) ? 1 : 0;
-}
-
 /* Forward declaration — defined in the connection management section below. */
 static void tofu_deauthenticate_connection_by_ssid(const char *ssid_target);
 static void tofu_set_autoconnect_for_ssid(const char *ssid_target, gboolean enable);
-
-/*
- * Verify the observed leaf cert against the CA cert stored in the
- * connection profile.  Notifies the registered CertificateAgent and
- * deauthenticates on mismatch.
- */
-static void
-tofu_verify_leaf_cert_with_config_ca(const char        *ssid,
-                                      NMTOFUCertSession *config_session,
-                                      NMTOFUCertSession *observed_session)
-{
-    NMTOFUCertInfo           *config_ca = NULL;
-    NMTOFUCertInfo           *leaf      = NULL;
-    gnutls_x509_crt_t         crt_leaf;
-    gnutls_datum_t            d_leaf, d_ca;
-    gnutls_x509_trust_list_t  trust = NULL;
-    unsigned int              verify = 0;
-    int                       ret;
-    guint                     i;
-
-    _NMLOG(LOGL_INFO, "CONFIGURED_CA: verifying leaf cert for SSID=%s", ssid);
-
-    if (!config_session || !config_session->certs || config_session->certs->len == 0) {
-        /* PATH scheme: s_config_cert not pre-loaded at act_stage2; load now from the
-         * UUID-keyed file written at TOFU acceptance time so NM can independently
-         * verify the cert and fire the failure notification if the CA changed. */
-        if (s_uuid && *s_uuid) {
-            gs_free char *auto_path =
-                g_strdup_printf("%s/ca-cert-%s.pem", TOFU_CERT_DIR, s_uuid);
-            tofu_load_config_ca_from_file(auto_path);
-            config_session = s_config_cert;
-        }
-        if (!config_session || !config_session->certs || config_session->certs->len == 0) {
-            _NMLOG(LOGL_WARN, "CONFIGURED_CA: no CA cert available for SSID=%s", ssid);
-            return;
-        }
-    }
-    if (!observed_session || !observed_session->certs || observed_session->certs->len == 0) {
-        _NMLOG(LOGL_WARN, "CONFIGURED_CA: no observed certs for SSID=%s", ssid);
-        return;
-    }
-
-    config_ca = g_ptr_array_index(config_session->certs, 0);
-
-    for (i = 0; i < observed_session->certs->len; i++) {
-        NMTOFUCertInfo *info = g_ptr_array_index(observed_session->certs, i);
-
-        if (info && info->depth == 0) {
-            leaf = info;
-            break;
-        }
-    }
-
-    if (!leaf || !config_ca) {
-        _NMLOG(LOGL_WARN, "CONFIGURED_CA: missing leaf or CA cert for SSID=%s", ssid);
-        return;
-    }
-
-    d_leaf.data = (unsigned char *) g_bytes_get_data(leaf->cert_data, NULL);
-    d_leaf.size = g_bytes_get_size(leaf->cert_data);
-    d_ca.data   = (unsigned char *) g_bytes_get_data(config_ca->cert_data, NULL);
-    d_ca.size   = g_bytes_get_size(config_ca->cert_data);
-
-    gnutls_x509_crt_init(&crt_leaf);
-
-    if (gnutls_x509_crt_import(crt_leaf, &d_leaf, GNUTLS_X509_FMT_DER) != GNUTLS_E_SUCCESS) {
-        _NMLOG(LOGL_WARN, "CONFIGURED_CA: leaf cert parse failed for SSID=%s", ssid);
-        gnutls_x509_crt_deinit(crt_leaf);
-        return;
-    }
-
-    /* config_ca->cert_data holds the whole saved ca-cert-<uuid>.pem file,
-     * which can (and for a real chain, must) contain several concatenated
-     * certs: every intermediate NM observed plus whatever the system trust
-     * store found above it. A single gnutls_x509_crt_t can only hold one of
-     * those, so load them all as trust anchors and let GnuTLS itself walk
-     * from the leaf up to whichever one actually signed it, instead of
-     * requiring the leaf to be signed directly by just the first cert in
-     * the file. */
-    ret = gnutls_x509_trust_list_init(&trust, 0);
-    if (ret < 0) {
-        _NMLOG(LOGL_WARN, "CONFIGURED_CA: trust list init failed for SSID=%s", ssid);
-        gnutls_x509_crt_deinit(crt_leaf);
-        return;
-    }
-
-    ret = gnutls_x509_trust_list_add_trust_mem(trust, &d_ca, NULL, GNUTLS_X509_FMT_PEM, 0, 0);
-    if (ret <= 0) {
-        _NMLOG(LOGL_WARN, "CONFIGURED_CA: no usable CA cert in pinned file for SSID=%s", ssid);
-        gnutls_x509_trust_list_deinit(trust, 1);
-        gnutls_x509_crt_deinit(crt_leaf);
-        return;
-    }
-
-    ret = gnutls_x509_trust_list_verify_crt(trust, &crt_leaf, 1, 0, &verify, NULL);
-
-    gnutls_x509_trust_list_deinit(trust, 1);
-    gnutls_x509_crt_deinit(crt_leaf);
-
-    if (ret < 0 || verify != 0) {
-        NMDBusManager   *dbus_mgr;
-        GDBusConnection *dbus_conn;
-
-        _NMLOG(LOGL_WARN,
-               "CONFIGURED_CA: leaf cert verification FAILED for SSID=%s (flags=0x%x)",
-               ssid,
-               verify);
-
-        dbus_mgr  = nm_dbus_manager_get();
-        dbus_conn = nm_dbus_manager_get_dbus_connection(dbus_mgr);
-        nm_certificate_agent_notify_failure(dbus_conn,
-                                            ssid,
-                                            "Server certificate does not match the "
-                                            "configured CA certificate.");
-        tofu_deauthenticate_connection_by_ssid(ssid);
-    } else {
-        _NMLOG(LOGL_INFO, "CONFIGURED_CA: leaf cert OK for SSID=%s", ssid);
-    }
-}
 
 /*****************************************************************************/
 /* Connection management helpers (all static — only called within this file)   */
@@ -872,8 +640,20 @@ tofu_authenticate_connection_by_ssid(const char *ssid_target)
         if (!nm_streq0(ssid_str, ssid_target))
             continue;
 
-        /* WiFi profiles rarely set connection.interface-name; find any WiFi device. */
+        /* Reconnect on the same interface the connection is actually bound
+         * to — picking "any WiFi device" here can grab a different radio
+         * than the one that ran the TOFU handshake (e.g. an AP-mode radio
+         * hosting a test hostapd instance), reconnecting on the wrong
+         * interface entirely. */
         {
+            const char *iface = nm_connection_get_interface_name(conn);
+
+            if (iface)
+                device = nm_manager_get_device(manager, iface, NM_DEVICE_TYPE_WIFI);
+        }
+        if (!device) {
+            /* No interface-name bound (common for profiles created without
+             * an explicit ifname) — fall back to any available WiFi device. */
             NMDevice    *dev_iter;
             const CList *tmp_list;
 
@@ -1261,9 +1041,10 @@ tofu_parse_and_dispatch(const char *disclaimer)
 }
 
 /*
- * Stage 3 entry for TOFU path: verify against system CAs (informational),
- * then dispatch cert info to the registered CertificateAgent for user
- * acceptance.
+ * Stage 3 entry for TOFU path: dispatch cert info to the registered
+ * CertificateAgent for user acceptance. wpa_supplicant's own TLS stack has
+ * already validated (or not) this chain by the time its Certification
+ * signal reaches us — NM does not redo that check here.
  *
  * Deauthenticates and disables autoconnect before calling the agent so the
  * user's decision is not overridden by an automatic reconnect.
@@ -1271,31 +1052,12 @@ tofu_parse_and_dispatch(const char *disclaimer)
 static void
 tofu_stage3(void)
 {
-    int         sys_result;
-    const char *disclaimer;
-
-    sys_result = tofu_verify_leaf_cert_with_system_ca(s_observed_certs);
-    switch (sys_result) {
-    case 1:
-        _NMLOG(LOGL_INFO, "server cert trusted by system CAs");
-        disclaimer = _("The server certificate is trusted by the system's CA bundle.");
-        break;
-    case 0:
-        _NMLOG(LOGL_INFO, "server cert NOT trusted by system CAs (self-signed or unknown CA)");
-        disclaimer = _("The server certificate is not trusted by the system's CA bundle. "
-                       "Please verify the certificate carefully.");
-        break;
-    default:
-        _NMLOG(LOGL_WARN, "system CA verification error %d", sys_result);
-        disclaimer = _("An error occurred while verifying the server certificate.");
-        break;
-    }
-
     /* Disconnect while user reviews; prevent reconnect loop. */
     tofu_deauthenticate_connection_by_ssid(s_ssid);
     tofu_set_autoconnect_for_ssid(s_ssid, FALSE);
 
-    tofu_parse_and_dispatch(disclaimer);
+    tofu_parse_and_dispatch(
+        _("Review the server certificate details below before trusting this network."));
 }
 
 /*****************************************************************************/
@@ -1397,23 +1159,6 @@ nm_tofu_stage2_cert_signal(GVariant *parameters)
     switch (s_session_type) {
     case NM_TOFU_SESSION_TYPE_TOFU:
         tofu_stage3();
-        break;
-
-    case NM_TOFU_SESSION_TYPE_CONFIGURED_CA:
-        tofu_verify_leaf_cert_with_config_ca(s_ssid, s_config_cert, s_observed_certs);
-        break;
-
-    case NM_TOFU_SESSION_TYPE_USER_TRUSTED_NO_CA:
-        if (nm_tofu_is_cert_hash_trusted(s_uuid, hash)) {
-            _NMLOG(LOGL_INFO,
-                   "stage2: pinned cert matched for SSID=%s — connection continues",
-                   s_ssid);
-        } else {
-            _NMLOG(LOGL_INFO,
-                   "stage2: cert hash changed for SSID=%s — re-entering TOFU flow",
-                   s_ssid);
-            tofu_stage3();
-        }
         break;
 
     default:

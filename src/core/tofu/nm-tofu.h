@@ -17,19 +17,24 @@
  * for the current connection attempt.
  *
  * DEFAULT  - no interception; let wpa_supplicant handle cert verification
- *            normally (ca-verify-mode == default or CA cert configured).
- * TOFU     - no CA cert configured; first-use path: collect server cert,
- *            ask the user to accept/reject, pin on accept.
- * CONFIGURED_CA - CA cert present in connection profile; verify observed
- *            server cert against it and notify agent on mismatch.
- * USER_TRUSTED_NO_CA - no CA cert configured but the connection has a
- *            previously pinned cert hash; verify hash and re-TOFU if changed.
+ *            normally (ca-verify-mode == default, or not an EAP-TLS method).
+ * TOFU     - ca-verify-mode == tofu; first-use path: collect server cert,
+ *            ask the user to accept/reject, pin on accept. NM does not
+ *            independently re-verify the chain — wpa_supplicant's own TLS
+ *            stack is the sole authority on whether it's valid.
+ *
+ * This is the only session type wired up for now. A CONFIGURED_CA-style
+ * independent re-verification path, and a USER_TRUSTED_NO_CA path that
+ * silently re-enters TOFU on a changed pinned hash, existed previously but
+ * were removed: both required NM to redo certificate chain validation
+ * itself via GnuTLS, duplicating what wpa_supplicant already does
+ * correctly. A replacement design for re-issuing the accept/reject prompt
+ * when a previously-pinned identity changes belongs here later, built
+ * around wpa_supplicant's own verdict instead.
  */
 typedef enum {
-    NM_TOFU_SESSION_TYPE_DEFAULT          = 0,
-    NM_TOFU_SESSION_TYPE_TOFU             = 1,
-    NM_TOFU_SESSION_TYPE_CONFIGURED_CA    = 2,
-    NM_TOFU_SESSION_TYPE_USER_TRUSTED_NO_CA = 3,
+    NM_TOFU_SESSION_TYPE_DEFAULT = 0,
+    NM_TOFU_SESSION_TYPE_TOFU    = 1,
 } NMTOFUSessionType;
 
 /*
@@ -73,15 +78,10 @@ void nm_tofu_stage2_cert_signal(GVariant *parameters);
 
 gboolean nm_tofu_mark_server_cert_as_trusted(const char *uuid,
                                               const char *cert_hash);
-gboolean nm_tofu_is_uuid_trusted(const char *uuid);
+gboolean nm_tofu_has_pinned_leaf_hash(const char *uuid);
 gboolean nm_tofu_is_cert_hash_trusted(const char *uuid,
                                        const char *observed_hash);
 void     nm_tofu_remove_server_cert_from_trusted(const char *uuid);
 char    *nm_tofu_get_stored_cert_hash(const char *uuid);
-
-/*****************************************************************************/
-/* CA cert from connection profile (CONFIGURED_CA path)                       */
-
-void nm_tofu_save_config_ca_cert_data(GBytes *cert_data);
 
 #endif /* NM_TOFU_H */

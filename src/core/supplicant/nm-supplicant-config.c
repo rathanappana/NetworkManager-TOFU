@@ -859,9 +859,11 @@ add_string_val(NMSupplicantConfig *self,
  * nm_supplicant_config_set_ca_cert_hash:
  *
  * Injects a wpa_supplicant hash://server/sha256/<hex> URI directly into the
- * supplicant config as ca_cert.  Bypasses NM's cert scheme validation (which
- * only accepts file://, pkcs11:, data:;base64,) and lets wpa_supplicant verify
- * the leaf cert fingerprint natively via its hash:// URI handler.
+ * supplicant config as ca_cert. This is wpa_supplicant's own native
+ * leaf-cert-pinning syntax, not something NM invents: it tells wpa_supplicant
+ * what to trust, the same way setting ca_cert to a file path does. NM does
+ * not verify the fingerprint itself — if it doesn't match what the server
+ * presents, wpa_supplicant's own TLS stack rejects the handshake natively.
  */
 gboolean
 nm_supplicant_config_set_ca_cert_hash(NMSupplicantConfig *self,

@@ -3576,6 +3576,7 @@ act_stage2_config(NMDevice *device, NMDeviceStateReason *out_failure_reason)
     NMActRequest                       *request;
     NMActiveConnection                 *controller_ac;
     NMDevice                           *controller;
+    gboolean                            skip_sup_timeout = FALSE;
 
     nm_clear_g_source(&priv->sup_timeout_id);
     nm_clear_g_source(&priv->link_timeout_id);
@@ -3662,13 +3663,30 @@ act_stage2_config(NMDevice *device, NMDeviceStateReason *out_failure_reason)
     } else
         nm_supplicant_interface_set_bridge(priv->sup_iface, NULL);
 
-    /* TOFU: detect session type before associating */
+    /* TOFU: fresh trust-on-first-use session. This is the only entry point
+     * for now — no independent NM-side certificate verification is done
+     * here anymore: wpa_supplicant's own TLS stack validates the chain
+     * (confirmed by testing that it completes correctly given the real
+     * chain the AP sends, root-only ca_cert included). NM's job is just to
+     * collect the observed certs for the user prompt and pin on accept.
+     * The CONFIGURED_CA / USER_TRUSTED_NO_CA re-verify-and-reissue-popup
+     * paths are removed for now; they'll come back redesigned around that
+     * same principle later. */
     {
         NMSetting8021x *s_8021x = nm_connection_get_setting_802_1x(connection);
 
         if (s_8021x
             && nm_setting_802_1x_get_ca_verify_mode(s_8021x)
-                   == NM_SETTING_802_1X_CA_VERIFY_MODE_TOFU) {
+                   == NM_SETTING_802_1X_CA_VERIFY_MODE_TOFU
+            /* ca-verify-mode is a stable user-set policy toggle, not a
+             * one-shot trigger — it stays "tofu" even after a cert gets
+             * pinned. Gate entry on cert presence instead of resetting that
+             * setting behind the user's back: once a CA cert exists, step
+             * out of the way entirely and let the normal 802-1x path run
+             * (real credentials, wpa_supplicant validates against the
+             * pinned CA itself). This is a presence check, not the removed
+             * verify-and-deauth-on-mismatch logic — no re-validation here. */
+            && nm_setting_802_1x_get_ca_cert_scheme(s_8021x) == NM_SETTING_802_1X_CK_SCHEME_UNKNOWN) {
             guint    n_eap   = nm_setting_802_1x_get_num_eap_methods(s_8021x);
             guint    i;
             gboolean has_eap = FALSE;
@@ -3683,44 +3701,24 @@ act_stage2_config(NMDevice *device, NMDeviceStateReason *out_failure_reason)
             }
 
             if (has_eap) {
-                NMSetting8021xCKScheme  scheme   = nm_setting_802_1x_get_ca_cert_scheme(s_8021x);
-                const char             *uuid     = nm_settings_connection_get_uuid(sett_conn);
-                gs_free char           *ssid_str = NULL;
-                GBytes                 *ssid_bytes;
+                const char   *uuid     = nm_settings_connection_get_uuid(sett_conn);
+                gs_free char *ssid_str = NULL;
+                GBytes       *ssid_bytes;
 
                 ssid_bytes = nm_setting_wireless_get_ssid(s_wireless);
                 ssid_str   = ssid_bytes ? _nm_utils_ssid_to_utf8(ssid_bytes) : NULL;
 
-                if (scheme != NM_SETTING_802_1X_CK_SCHEME_UNKNOWN) {
-                    if (scheme == NM_SETTING_802_1X_CK_SCHEME_BLOB) {
-                        GBytes *blob = nm_setting_802_1x_get_ca_cert_blob(s_8021x);
+                nm_tofu_set_session(NM_TOFU_SESSION_TYPE_TOFU, ssid_str, uuid);
+                nm_supplicant_config_suppress_credentials_for_tofu(config);
 
-                        if (blob)
-                            nm_tofu_save_config_ca_cert_data(blob);
-                    }
-                    nm_tofu_set_session(NM_TOFU_SESSION_TYPE_CONFIGURED_CA, ssid_str, uuid);
-                } else if (nm_tofu_is_uuid_trusted(uuid)) {
-                    nm_tofu_set_session(NM_TOFU_SESSION_TYPE_USER_TRUSTED_NO_CA, ssid_str, uuid);
-                    {
-                        gs_free char         *stored_hash = nm_tofu_get_stored_cert_hash(uuid);
-                        gs_free_error GError *hash_err    = NULL;
-
-                        if (stored_hash) {
-                            if (!nm_supplicant_config_set_ca_cert_hash(config, stored_hash, &hash_err))
-                                _LOGW(LOGD_WIFI,
-                                      "tofu: ca_cert hash inject failed for uuid=%s: %s",
-                                      uuid,
-                                      hash_err->message);
-                        } else {
-                            _LOGD(LOGD_WIFI,
-                                  "tofu: no stored hash for uuid=%s, skipping ca_cert pin",
-                                  uuid);
-                        }
-                    }
-                } else {
-                    nm_tofu_set_session(NM_TOFU_SESSION_TYPE_TOFU, ssid_str, uuid);
-                    nm_supplicant_config_suppress_credentials_for_tofu(config);
-                }
+                /* Credentials are withheld until the user accepts the cert,
+                 * so EAP is expected to stall past the generic association
+                 * timeout while NM waits for wpa_supplicant's Certification
+                 * signal. tofu_stage3() deauthenticates as soon as the leaf
+                 * cert arrives, which cancels this timer anyway via the
+                 * normal deactivate path — skipping it here only matters if
+                 * the AP never sends anything at all for this attempt. */
+                skip_sup_timeout = TRUE;
             }
         }
     }
@@ -3728,8 +3726,10 @@ act_stage2_config(NMDevice *device, NMDeviceStateReason *out_failure_reason)
     nm_supplicant_interface_assoc(priv->sup_iface, config, supplicant_iface_assoc_cb, self);
 
     /* Set up a timeout on the association attempt */
-    timeout              = nm_device_get_supplicant_timeout(NM_DEVICE(self));
-    priv->sup_timeout_id = g_timeout_add_seconds(timeout, supplicant_connection_timeout_cb, self);
+    if (!skip_sup_timeout) {
+        timeout              = nm_device_get_supplicant_timeout(NM_DEVICE(self));
+        priv->sup_timeout_id = g_timeout_add_seconds(timeout, supplicant_connection_timeout_cb, self);
+    }
 
     if (!priv->periodic_update_id)
         priv->periodic_update_id = g_timeout_add_seconds(6, periodic_update_cb, self);
