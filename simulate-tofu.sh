@@ -62,9 +62,24 @@ if [ -f "$FR_DIR/server.crt" ]; then
     [[ "$ans" =~ ^[Nn]$ ]] && recreate_certs="n"
 fi
 
-delete_profile="n"
-read -rp "Delete existing '$CON_NAME' connection profile before starting? [Y/n] " ans
-[[ "$ans" =~ ^[Nn]$ ]] || delete_profile="y"
+if [ "$recreate_certs" = "y" ]; then
+    # New certs make any pinned hash / ca-cert on the old profile stale —
+    # always delete it too, no point asking.
+    delete_profile="y"
+else
+    delete_profile="n"
+    read -rp "Delete existing '$CON_NAME' connection profile before starting? [Y/n] " ans
+    [[ "$ans" =~ ^[Nn]$ ]] || delete_profile="y"
+fi
+
+# FreeRADIUS bootstrap alone only ever produces a root->leaf chain directly
+# (confirmed against its Makefile/*.cnf — no intermediate tier exists there to
+# reuse). Building the extra intermediate tier is only needed when you want
+# hostapd to serve leaf+intermediate (no root, the correct real-world server
+# config) so ca-cert can be tested as root-only vs full-chain by hand.
+build_chain="n"
+read -rp "Build a 3-tier chain (root+intermediate+leaf), or is the plain bootstrap (root+leaf) enough? [chain/simple, default simple] " ans
+[[ "$ans" =~ ^[Cc] ]] && build_chain="y"
 
 # Cleanup trap: stop hostapd and virtual hardware, but keep the persistent
 # cert directory and the connection profile so results can be inspected
@@ -137,13 +152,59 @@ if [ ! -f "$FR_DIR/server.crt" ] || [ ! -f "$FR_DIR/ca.pem" ] || [ ! -f "$FR_DIR
     exit 1
 fi
 
-# hostapd sends this whole chain during the TLS handshake, so wpa_supplicant's
-# Certification signal reports depth=0 (server leaf) then depth=1 (root CA) —
-# exercises the CA-chain pinning path, not just leaf-hash pinning.
-cat "$FR_DIR/server.crt" "$FR_DIR/ca.pem" > "$CERT_DIR/server-chain.pem"
+if [ "$build_chain" = "y" ] && { [ "$recreate_certs" = "y" ] || [ ! -f "$FR_DIR/server2.crt" ]; }; then
+    echo "  -> Building 3-tier root->intermediate->leaf chain..."
+    (
+        cd "$FR_DIR"
+
+        # Intermediate CA, signed by the bootstrap root.
+        openssl genrsa -out intermediate.key 2048 2>/dev/null
+        openssl req -new -key intermediate.key -out intermediate.csr \
+            -subj "/C=BE/O=WiSec26/CN=TOFU-Sim Intermediate CA" 2>/dev/null
+        # ca.key is passphrase-encrypted (ca.cnf output_password=whatever, same
+        # as server.key) — without -passin, openssl blocks on a stdin prompt
+        # that isn't there, fails, and set -e kills the whole script.
+        openssl x509 -req -in intermediate.csr -CA ca.pem -CAkey ca.key -passin pass:whatever \
+            -CAcreateserial -out intermediate.pem -days 3650 \
+            -extfile <(printf "basicConstraints=critical,CA:TRUE,pathlen:0\nkeyUsage=critical,keyCertSign,cRLSign\n") \
+            2>/dev/null
+
+        # New leaf, signed by the intermediate (not the root) — mirrors a real
+        # eduroam/campusroam chain (leaf issued by an intermediate, not the root).
+        openssl genrsa -out server2.key 2048 2>/dev/null
+        openssl req -new -key server2.key -out server2.csr \
+            -subj "/C=BE/O=WiSec26/CN=TOFU-Simulated-Server" 2>/dev/null
+        openssl x509 -req -in server2.csr -CA intermediate.pem -CAkey intermediate.key -CAcreateserial \
+            -out server2.crt -days 365 \
+            -extfile <(printf "basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n") \
+            2>/dev/null
+    )
+fi
+
+if [ "$build_chain" = "y" ]; then
+    # hostapd sends leaf+intermediate only — the correct real-world server
+    # config (the root is never sent over the wire, only used locally as a
+    # trust anchor).
+    cat "$FR_DIR/server2.crt" "$FR_DIR/intermediate.pem" > "$CERT_DIR/server-chain.pem"
+    SERVER_CRT="$FR_DIR/server2.crt"
+    HOSTAPD_KEY="$FR_DIR/server2.key"
+    HOSTAPD_KEY_PASSWD=""
+
+    cat "$FR_DIR/intermediate.pem" "$FR_DIR/ca.pem" > "$CERT_DIR/full_chain.pem"
+    echo "  -> Full chain (intermediate+root) for 802-1x.ca-cert : $CERT_DIR/full_chain.pem"
+    echo "  -> Root only for 802-1x.ca-cert                      : $FR_DIR/ca.pem"
+else
+    # hostapd sends this whole chain during the TLS handshake, so wpa_supplicant's
+    # Certification signal reports depth=0 (server leaf) then depth=1 (root CA) —
+    # exercises the CA-chain pinning path, not just leaf-hash pinning.
+    cat "$FR_DIR/server.crt" "$FR_DIR/ca.pem" > "$CERT_DIR/server-chain.pem"
+    SERVER_CRT="$FR_DIR/server.crt"
+    HOSTAPD_KEY="$FR_DIR/server.key"
+    HOSTAPD_KEY_PASSWD="whatever"
+fi
 
 echo "  -> Server cert fingerprint:"
-openssl x509 -in "$FR_DIR/server.crt" -noout -fingerprint -sha256 | sed 's/^/     /'
+openssl x509 -in "$SERVER_CRT" -noout -fingerprint -sha256 | sed 's/^/     /'
 echo "  -> Root CA fingerprint:"
 openssl x509 -in "$FR_DIR/ca.pem" -noout -fingerprint -sha256 | sed 's/^/     /'
 
@@ -163,13 +224,15 @@ ieee8021x=1
 eap_server=1
 eap_user_file=$CERT_DIR/hostapd.eap_user
 server_cert=$CERT_DIR/server-chain.pem
-private_key=$FR_DIR/server.key
-private_key_passwd=whatever
+private_key=$HOSTAPD_KEY
 logger_syslog=-1
 logger_syslog_level=0
 logger_stdout=-1
 logger_stdout_level=0
 EOF
+if [ -n "$HOSTAPD_KEY_PASSWD" ]; then
+    echo "private_key_passwd=$HOSTAPD_KEY_PASSWD" >> "$CERT_DIR/hostapd.conf"
+fi
 
 cat <<EOF > "$CERT_DIR/hostapd.eap_user"
 # Wildcard outer-identity entry: TOFU sends anonymous_identity ("anonymous",
@@ -209,6 +272,8 @@ if ! nmcli -t -f NAME connection show | grep -qx "$CON_NAME"; then
         802-1x.phase2-auth mschapv2 \
         802-1x.identity "testuser" \
         802-1x.password "testpass" \
+#        802-1x.ca-verify-mode 0 \
+#        802-1x.ca-cert "/tmp/tofu-sim/frcerts/ca.pem" \
         ipv4.method manual \
         ipv4.addresses 192.168.50.2/24 \
         ipv4.gateway 192.168.50.1 \
@@ -217,8 +282,15 @@ if ! nmcli -t -f NAME connection show | grep -qx "$CON_NAME"; then
         > /dev/null
 fi
 
-# Enable TOFU (NM_SETTING_802_1X_CA_VERIFY_MODE_TOFU = 1)
-nmcli connection modify "$CON_NAME" 802-1x.ca-verify-mode 1
+# 802-1x.ca-verify-mode and 802-1x.ca-cert are left for you to set by hand —
+# use the file paths printed above (full_chain.pem / ca.pem) to test
+# root-only vs full-chain, or leave ca-cert unset with ca-verify-mode=1 for
+# the normal TOFU accept/reject flow:
+#   nmcli connection modify "TOFU-Sim-Net" 802-1x.ca-verify-mode <0|1>
+#   nmcli connection modify "TOFU-Sim-Net" 802-1x.ca-cert <path from above>
+# TOFU is set
+nmcli connection modify "TOFU-Sim-Net" 802-1x.ca-verify-mode 1
+
 
 # TEMPORARY DIAGNOSTIC: default supplicant/association timeout is 25s
 # (SUPPLICANT_DEFAULT_TIMEOUT, src/core/devices/nm-device.c:19170), far
@@ -231,9 +303,9 @@ nmcli connection modify "$CON_NAME" 802-1x.auth-timeout 600
 echo "[5/5] Ready."
 echo "===================================================="
 echo "Test environment is ready."
-echo "Before connecting: make sure a CertificateAgent is running,"
-echo "either 'nmtui' or the modified nm-applet, in another terminal,"
-echo "so the TOFU prompt has somewhere to show up."
+echo "Adjust 802-1x.ca-verify-mode / 802-1x.ca-cert as needed (see above), then:"
+echo "if using TOFU, make sure a CertificateAgent is running ('nmtui' or the"
+echo "modified nm-applet) in another terminal so the prompt has somewhere to show up."
 echo ""
 echo "Watch NetworkManager logs in another terminal with:"
 echo "  sudo journalctl -u NetworkManager -f"
