@@ -1757,6 +1757,22 @@ nm_supplicant_config_add_setting_8021x(NMSupplicantConfig *self,
                 return FALSE;
             }
             break;
+        case NM_SETTING_802_1X_CK_SCHEME_SERVER_HASH:
+            /* An opaque "hash://server/sha256/<hex>" URI, not a filesystem
+             * path — added directly here (like the PKCS11 case above), not
+             * via the shared `path` variable below: that path also carries
+             * a private_user restriction that exists only for PATH's
+             * file-read concern, which does not apply here (no file is
+             * ever read). */
+            if (!add_string_val(self,
+                                nm_setting_802_1x_get_ca_cert_uri(setting),
+                                "ca_cert",
+                                FALSE,
+                                NULL,
+                                error)) {
+                return FALSE;
+            }
+            break;
         default:
             break;
         }
@@ -1796,6 +1812,16 @@ nm_supplicant_config_add_setting_8021x(NMSupplicantConfig *self,
                     nm_setting_802_1x_get_phase2_ca_cert_password(setting),
                     nm_setting_802_1x_get_phase2_ca_cert_password_flags(setting),
                     error)) {
+                return FALSE;
+            }
+            break;
+        case NM_SETTING_802_1X_CK_SCHEME_SERVER_HASH:
+            if (!add_string_val(self,
+                                nm_setting_802_1x_get_phase2_ca_cert_uri(setting),
+                                "ca_cert2",
+                                FALSE,
+                                NULL,
+                                error)) {
                 return FALSE;
             }
             break;

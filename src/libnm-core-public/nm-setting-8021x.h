@@ -17,6 +17,7 @@ G_BEGIN_DECLS
 
 #define NM_SETTING_802_1X_CERT_SCHEME_PREFIX_PATH   "file://"
 #define NM_SETTING_802_1X_CERT_SCHEME_PREFIX_PKCS11 "pkcs11:"
+#define NM_SETTING_802_1X_CERT_SCHEME_PREFIX_SERVER_HASH "hash://"
 
 /**
  * NMSetting8021xCKFormat:
@@ -47,6 +48,12 @@ typedef enum { /*< underscore_name=nm_setting_802_1x_ck_format >*/
  * to a file containing the certificate or key data
  * @NM_SETTING_802_1X_CK_SCHEME_PKCS11: certificate or key is stored as a
  * URI of an object on a PKCS#11 token
+ * @NM_SETTING_802_1X_CK_SCHEME_SERVER_HASH: for #NMSetting8021x:ca-cert or
+ * #NMSetting8021x:phase2-ca-cert: the CA certificate check is replaced by
+ * pinning the server (leaf) certificate's SHA-256 fingerprint directly,
+ * using wpa_supplicant's native "hash://server/sha256/<hex>" syntax.
+ * Any CA certificates in the server's chain are ignored; only the leaf
+ * certificate is matched.
  *
  * #NMSetting8021xCKScheme values indicate how a certificate or private key is
  * stored in the setting properties, either as a blob of the item's data, or as
@@ -57,6 +64,7 @@ typedef enum { /*< underscore_name=nm_setting_802_1x_ck_scheme >*/
                NM_SETTING_802_1X_CK_SCHEME_BLOB,
                NM_SETTING_802_1X_CK_SCHEME_PATH,
                NM_SETTING_802_1X_CK_SCHEME_PKCS11,
+               NM_SETTING_802_1X_CK_SCHEME_SERVER_HASH,
 } NMSetting8021xCKScheme;
 
 /**
