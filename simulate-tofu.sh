@@ -265,6 +265,8 @@ if [ "$delete_profile" = "y" ]; then
     nmcli connection delete "$CON_NAME" 2>/dev/null || true
 fi
 
+#        802-1x.ca-verify-mode 0 \
+#        802-1x.ca-cert "/tmp/tofu-sim/frcerts/ca.pem" \
 if ! nmcli -t -f NAME connection show | grep -qx "$CON_NAME"; then
     nmcli connection add type wifi ifname "$CLIENT_IFACE" con-name "$CON_NAME" ssid "$SSID" \
         wifi-sec.key-mgmt wpa-eap \
@@ -272,8 +274,6 @@ if ! nmcli -t -f NAME connection show | grep -qx "$CON_NAME"; then
         802-1x.phase2-auth mschapv2 \
         802-1x.identity "testuser" \
         802-1x.password "testpass" \
-#        802-1x.ca-verify-mode 0 \
-#        802-1x.ca-cert "/tmp/tofu-sim/frcerts/ca.pem" \
         ipv4.method manual \
         ipv4.addresses 192.168.50.2/24 \
         ipv4.gateway 192.168.50.1 \
@@ -298,7 +298,7 @@ nmcli connection modify "TOFU-Sim-Net" 802-1x.ca-verify-mode 1
 # Overriding it here to isolate whether NO_SECRETS is the 25s race firing, or
 # a real EAP-TLS/Certification failure. Remove once nm-tofu.c manages its own
 # timeout for TOFU sessions instead of relying on this race.
-nmcli connection modify "$CON_NAME" 802-1x.auth-timeout 600
+# nmcli connection modify "$CON_NAME" 802-1x.auth-timeout 600
 
 echo "[5/5] Ready."
 echo "===================================================="
