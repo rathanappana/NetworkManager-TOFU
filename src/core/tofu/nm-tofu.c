@@ -199,8 +199,8 @@ extract_san_dnsnames(GBytes *cert_data)
 }
 
 /* Forward declaration — defined in the connection management section below. */
-static void tofu_deauthenticate_connection_by_ssid(const char *ssid_target);
-static void tofu_set_autoconnect_for_ssid(const char *ssid_target, gboolean enable);
+static void tofu_deauthenticate_connection_by_uuid(const char *uuid_target);
+static void tofu_set_autoconnect_for_uuid(const char *uuid_target, gboolean enable);
 
 /*****************************************************************************/
 /* Connection management helpers (all static — only called within this file)   */
@@ -330,268 +330,192 @@ tofu_save_cert_chain_as_pem(NMTOFUCertSession *observed_session, GError **error)
 }
 
 static void
-tofu_deauthenticate_connection_by_ssid(const char *ssid_target)
+tofu_deauthenticate_connection_by_uuid(const char *uuid_target)
 {
-    NMManager          *manager = nm_manager_get();
-    NMActiveConnection *ac;
-    const CList        *tmp_list;
+    NMManager            *manager = nm_manager_get();
+    NMSettingsConnection *sconn;
+    NMActiveConnection   *ac;
+    const CList          *tmp_list;
 
-    if (!manager || !ssid_target)
+    if (!manager || !uuid_target)
+        return;
+
+    sconn = nm_settings_get_connection_by_uuid(nm_settings_get(), uuid_target);
+    if (!sconn)
         return;
 
     nm_manager_for_each_active_connection (manager, ac, tmp_list) {
-        NMSettingsConnection *sconn = nm_active_connection_get_settings_connection(ac);
         gs_free_error GError *error = NULL;
-        NMConnection         *conn;
-        NMSettingWireless    *s_wifi;
-        GBytes               *ssid_bytes;
-        gs_free char         *ssid_str = NULL;
 
-        if (!sconn)
-            continue;
-        conn       = nm_settings_connection_get_connection(sconn);
-        s_wifi     = nm_connection_get_setting_wireless(conn);
-        if (!s_wifi)
-            continue;
-        ssid_bytes = nm_setting_wireless_get_ssid(s_wifi);
-        ssid_str   = ssid_bytes ? _nm_utils_ssid_to_utf8(ssid_bytes) : NULL;
-        if (!nm_streq0(ssid_str, ssid_target))
+        if (nm_active_connection_get_settings_connection(ac) != sconn)
             continue;
 
-        _NMLOG(LOGL_INFO, "deauthenticating SSID=%s", ssid_target);
+        _NMLOG(LOGL_INFO, "deauthenticating uuid=%s", uuid_target);
         if (!nm_manager_deactivate_connection(manager,
                                               ac,
                                               NM_DEVICE_STATE_REASON_USER_REQUESTED,
                                               &error)) {
-            _NMLOG(LOGL_WARN, "deactivate SSID=%s failed: %s", ssid_target, error->message);
+            _NMLOG(LOGL_WARN, "deactivate uuid=%s failed: %s", uuid_target, error->message);
         }
         return;
     }
-    _NMLOG(LOGL_DEBUG, "no active connection for SSID=%s", ssid_target);
+    _NMLOG(LOGL_DEBUG, "no active connection for uuid=%s", uuid_target);
 }
 
 static void
-tofu_set_autoconnect_for_ssid(const char *ssid_target, gboolean enable)
+tofu_set_autoconnect_for_uuid(const char *uuid_target, gboolean enable)
 {
-    NMSettings           *settings;
-    NMSettingsConnection *const *conns;
-    guint                 n, i;
+    NMSettingsConnection *sconn;
+    NMConnection         *clone;
+    NMSettingConnection  *s_con;
+    gs_free_error GError *error = NULL;
 
-    if (!ssid_target)
+    if (!uuid_target)
         return;
 
-    settings = nm_settings_get();
-    conns    = nm_settings_get_connections(settings, &n);
-    for (i = 0; i < n; i++) {
-        NMSettingsConnection *sconn = conns[i];
-        NMConnection         *clone;
-        NMSettingConnection  *s_con;
-        NMSettingWireless    *s_wifi;
-        gs_free_error GError *error = NULL;
-        GBytes               *ssid_bytes;
-        gs_free char         *ssid_str = NULL;
+    sconn = nm_settings_get_connection_by_uuid(nm_settings_get(), uuid_target);
+    if (!sconn) {
+        _NMLOG(LOGL_WARN, "no connection found for uuid=%s", uuid_target);
+        return;
+    }
 
-        if (!sconn)
-            continue;
-        s_wifi     = nm_connection_get_setting_wireless(nm_settings_connection_get_connection(sconn));
-        if (!s_wifi)
-            continue;
-        ssid_bytes = nm_setting_wireless_get_ssid(s_wifi);
-        ssid_str   = ssid_bytes ? _nm_utils_ssid_to_utf8(ssid_bytes) : NULL;
-        if (!nm_streq0(ssid_str, ssid_target))
-            continue;
-
-        clone = nm_simple_connection_new_clone(nm_settings_connection_get_connection(sconn));
-        s_con = nm_connection_get_setting_connection(clone);
-        if (!s_con) {
-            _NMLOG(LOGL_WARN, "no connection setting for SSID=%s", ssid_target);
-            g_object_unref(clone);
-            return;
-        }
-
-        if (nm_setting_connection_get_autoconnect(s_con) == enable) {
-            g_object_unref(clone);
-            return;
-        }
-
-        g_object_set(s_con, NM_SETTING_CONNECTION_AUTOCONNECT, enable, NULL);
-        if (!nm_settings_connection_update(sconn,
-                                           NULL,
-                                           clone,
-                                           NM_SETTINGS_CONNECTION_PERSIST_MODE_KEEP,
-                                           NM_SETTINGS_CONNECTION_INT_FLAGS_NONE,
-                                           NM_SETTINGS_CONNECTION_INT_FLAGS_NONE,
-                                           NM_SETTINGS_CONNECTION_UPDATE_REASON_UPDATE_NON_SECRET,
-                                           "tofu",
-                                           &error)) {
-            _NMLOG(LOGL_WARN,
-                   "failed to set autoconnect=%s for SSID=%s: %s",
-                   enable ? "on" : "off",
-                   ssid_target,
-                   error->message);
-        } else {
-            _NMLOG(LOGL_INFO, "autoconnect=%s for SSID=%s", enable ? "on" : "off", ssid_target);
-        }
+    clone = nm_simple_connection_new_clone(nm_settings_connection_get_connection(sconn));
+    s_con = nm_connection_get_setting_connection(clone);
+    if (!s_con) {
+        _NMLOG(LOGL_WARN, "no connection setting for uuid=%s", uuid_target);
         g_object_unref(clone);
         return;
     }
-    _NMLOG(LOGL_WARN, "no connection found for SSID=%s", ssid_target);
+
+    if (nm_setting_connection_get_autoconnect(s_con) == enable) {
+        g_object_unref(clone);
+        return;
+    }
+
+    g_object_set(s_con, NM_SETTING_CONNECTION_AUTOCONNECT, enable, NULL);
+    if (!nm_settings_connection_update(sconn,
+                                       NULL,
+                                       clone,
+                                       NM_SETTINGS_CONNECTION_PERSIST_MODE_KEEP,
+                                       NM_SETTINGS_CONNECTION_INT_FLAGS_NONE,
+                                       NM_SETTINGS_CONNECTION_INT_FLAGS_NONE,
+                                       NM_SETTINGS_CONNECTION_UPDATE_REASON_UPDATE_NON_SECRET,
+                                       "tofu",
+                                       &error)) {
+        _NMLOG(LOGL_WARN,
+               "failed to set autoconnect=%s for uuid=%s: %s",
+               enable ? "on" : "off",
+               uuid_target,
+               error->message);
+    } else {
+        _NMLOG(LOGL_INFO, "autoconnect=%s for uuid=%s", enable ? "on" : "off", uuid_target);
+    }
+    g_object_unref(clone);
 }
 
 static void
-tofu_authenticate_connection_by_ssid(const char *ssid_target)
+tofu_authenticate_connection_by_uuid(const char *uuid_target)
 {
-    NMManager            *manager;
-    NMSettings           *settings;
-    NMSettingsConnection *const *conns;
-    guint                 n, i;
+    NMManager                     *manager;
+    NMSettingsConnection          *sconn;
+    NMConnection                  *conn;
+    NMDevice                      *device = NULL;
+    gs_free_error GError          *error   = NULL;
+    gs_unref_object NMAuthSubject *subject = NULL;
 
-    if (!ssid_target)
+    if (!uuid_target)
         return;
 
-    manager  = nm_manager_get();
-    settings = nm_settings_get();
-    if (!manager || !settings)
+    manager = nm_manager_get();
+    if (!manager)
         return;
 
-    conns = nm_settings_get_connections(settings, &n);
-    for (i = 0; i < n; i++) {
-        NMSettingsConnection          *sconn = conns[i];
-        NMConnection                  *conn;
-        NMSettingWireless             *s_wifi;
-        NMDevice                      *device = NULL;
-        gs_free_error GError          *error   = NULL;
-        gs_unref_object NMAuthSubject *subject = NULL;
-        GBytes                        *ssid_bytes;
-        gs_free char                  *ssid_str = NULL;
+    sconn = nm_settings_get_connection_by_uuid(nm_settings_get(), uuid_target);
+    if (!sconn) {
+        _NMLOG(LOGL_WARN, "no connection found for uuid=%s", uuid_target);
+        return;
+    }
+    conn = nm_settings_connection_get_connection(sconn);
 
-        if (!sconn)
-            continue;
-        conn       = nm_settings_connection_get_connection(sconn);
-        s_wifi     = nm_connection_get_setting_wireless(conn);
-        if (!s_wifi)
-            continue;
-        ssid_bytes = nm_setting_wireless_get_ssid(s_wifi);
-        ssid_str   = ssid_bytes ? _nm_utils_ssid_to_utf8(ssid_bytes) : NULL;
-        if (!nm_streq0(ssid_str, ssid_target))
-            continue;
+    /* Reconnect on the same interface the connection is actually bound
+     * to — picking "any WiFi device" here can grab a different radio
+     * than the one that ran the TOFU handshake (e.g. an AP-mode radio
+     * hosting a test hostapd instance), reconnecting on the wrong
+     * interface entirely. */
+    {
+        const char *iface = nm_connection_get_interface_name(conn);
 
-        /* Reconnect on the same interface the connection is actually bound
-         * to — picking "any WiFi device" here can grab a different radio
-         * than the one that ran the TOFU handshake (e.g. an AP-mode radio
-         * hosting a test hostapd instance), reconnecting on the wrong
-         * interface entirely. */
-        {
-            const char *iface = nm_connection_get_interface_name(conn);
+        if (iface)
+            device = nm_manager_get_device(manager, iface, NM_DEVICE_TYPE_WIFI);
+    }
+    if (!device) {
+        /* No interface-name bound (common for profiles created without
+         * an explicit ifname) — fall back to any available WiFi device. */
+        NMDevice    *dev_iter;
+        const CList *tmp_list;
 
-            if (iface)
-                device = nm_manager_get_device(manager, iface, NM_DEVICE_TYPE_WIFI);
-        }
-        if (!device) {
-            /* No interface-name bound (common for profiles created without
-             * an explicit ifname) — fall back to any available WiFi device. */
-            NMDevice    *dev_iter;
-            const CList *tmp_list;
-
-            nm_manager_for_each_device(manager, dev_iter, tmp_list) {
-                if (nm_device_get_device_type(dev_iter) == NM_DEVICE_TYPE_WIFI) {
-                    device = dev_iter;
-                    break;
-                }
+        nm_manager_for_each_device(manager, dev_iter, tmp_list) {
+            if (nm_device_get_device_type(dev_iter) == NM_DEVICE_TYPE_WIFI) {
+                device = dev_iter;
+                break;
             }
         }
-        if (!device) {
-            _NMLOG(LOGL_WARN, "no WiFi device found for SSID=%s", ssid_target);
-            return;
-        }
-
-        subject = nm_auth_subject_new_internal();
-        _NMLOG(LOGL_INFO, "activating SSID=%s on %s", ssid_target, nm_device_get_iface(device));
-        if (!nm_manager_activate_connection(manager,
-                                            sconn,
-                                            NULL,
-                                            NULL,
-                                            device,
-                                            subject,
-                                            NM_ACTIVATION_TYPE_MANAGED,
-                                            NM_ACTIVATION_REASON_USER_REQUEST,
-                                            NM_ACTIVATION_STATE_FLAG_NONE,
-                                            &error)) {
-            _NMLOG(LOGL_WARN, "activation failed for SSID=%s: %s", ssid_target, error->message);
-        }
+    }
+    if (!device) {
+        _NMLOG(LOGL_WARN, "no WiFi device found for uuid=%s", uuid_target);
         return;
     }
-    _NMLOG(LOGL_WARN, "no connection found for SSID=%s", ssid_target);
+
+    subject = nm_auth_subject_new_internal();
+    _NMLOG(LOGL_INFO, "activating uuid=%s on %s", uuid_target, nm_device_get_iface(device));
+    if (!nm_manager_activate_connection(manager,
+                                        sconn,
+                                        NULL,
+                                        NULL,
+                                        device,
+                                        subject,
+                                        NM_ACTIVATION_TYPE_MANAGED,
+                                        NM_ACTIVATION_REASON_USER_REQUEST,
+                                        NM_ACTIVATION_STATE_FLAG_NONE,
+                                        &error)) {
+        _NMLOG(LOGL_WARN, "activation failed for uuid=%s: %s", uuid_target, error->message);
+    }
 }
 
 static void
-tofu_remove_connection(const char *ssid)
+tofu_remove_connection(const char *uuid)
 {
-    NMSettings           *settings;
-    NMSettingsConnection *const *conns;
-    guint                 n, i;
+    NMSettingsConnection *sconn;
 
-    if (!ssid)
+    if (!uuid)
         return;
 
-    settings = nm_settings_get();
-    conns    = nm_settings_get_connections(settings, &n);
-    for (i = 0; i < n; i++) {
-        NMSettingsConnection *sconn = conns[i];
-        NMSettingWireless    *s_wifi;
-        GBytes               *ssid_bytes;
-        gs_free char         *ssid_str = NULL;
-
-        if (!sconn)
-            continue;
-        s_wifi     = nm_connection_get_setting_wireless(nm_settings_connection_get_connection(sconn));
-        if (!s_wifi)
-            continue;
-        ssid_bytes = nm_setting_wireless_get_ssid(s_wifi);
-        ssid_str   = ssid_bytes ? _nm_utils_ssid_to_utf8(ssid_bytes) : NULL;
-        if (!nm_streq0(ssid_str, ssid))
-            continue;
-
-        _NMLOG(LOGL_INFO, "removing connection profile for SSID=%s", ssid);
-        nm_settings_connection_delete(sconn, FALSE);
+    sconn = nm_settings_get_connection_by_uuid(nm_settings_get(), uuid);
+    if (!sconn) {
+        _NMLOG(LOGL_WARN, "no connection found to remove for uuid=%s", uuid);
         return;
     }
-    _NMLOG(LOGL_WARN, "no connection found to remove for SSID=%s", ssid);
+
+    _NMLOG(LOGL_INFO, "removing connection profile for uuid=%s", uuid);
+    nm_settings_connection_delete(sconn, FALSE);
 }
 
 static void
-tofu_add_timestamp_to_connection(const char *ssid)
+tofu_add_timestamp_to_connection(const char *uuid)
 {
-    NMSettings           *settings;
-    NMSettingsConnection *const *conns;
-    guint                 n, i;
+    NMSettingsConnection *sconn;
 
-    if (!ssid)
+    if (!uuid)
         return;
 
-    settings = nm_settings_get();
-    conns    = nm_settings_get_connections(settings, &n);
-    for (i = 0; i < n; i++) {
-        NMSettingsConnection *sconn = conns[i];
-        NMSettingWireless    *s_wifi;
-        GBytes               *ssid_bytes;
-        gs_free char         *ssid_str = NULL;
-
-        if (!sconn)
-            continue;
-        s_wifi     = nm_connection_get_setting_wireless(nm_settings_connection_get_connection(sconn));
-        if (!s_wifi)
-            continue;
-        ssid_bytes = nm_setting_wireless_get_ssid(s_wifi);
-        ssid_str   = ssid_bytes ? _nm_utils_ssid_to_utf8(ssid_bytes) : NULL;
-        if (!nm_streq0(ssid_str, ssid))
-            continue;
-
-        _NMLOG(LOGL_DEBUG, "updating timestamp for SSID=%s", ssid);
-        nm_settings_connection_update_timestamp(sconn, (guint64) time(NULL));
+    sconn = nm_settings_get_connection_by_uuid(nm_settings_get(), uuid);
+    if (!sconn) {
+        _NMLOG(LOGL_WARN, "no connection found for timestamp uuid=%s", uuid);
         return;
     }
-    _NMLOG(LOGL_WARN, "no connection found for timestamp SSID=%s", ssid);
+
+    _NMLOG(LOGL_DEBUG, "updating timestamp for uuid=%s", uuid);
+    nm_settings_connection_update_timestamp(sconn, (guint64) time(NULL));
 }
 
 /*
@@ -599,13 +523,14 @@ tofu_add_timestamp_to_connection(const char *ssid)
  * 802-1x ca-cert field, then save to disk.
  */
 static void
-tofu_update_ca_cert(const char *ssid)
+tofu_update_ca_cert(const char *uuid)
 {
     gs_free char         *pem_path = NULL;
     gs_free_error GError *error = NULL;
-    NMSettings           *settings;
-    NMSettingsConnection *const *conns;
-    guint                 n, i;
+    NMSettingsConnection *sconn;
+    NMConnection         *clone;
+    NMSetting8021x       *s_8021x;
+    gs_free_error GError *upd_err = NULL;
 
     if (!s_observed_certs || !s_observed_certs->certs || s_observed_certs->certs->len == 0) {
         _NMLOG(LOGL_WARN, "update-ca-cert: no certs in session");
@@ -618,65 +543,47 @@ tofu_update_ca_cert(const char *ssid)
         return;
     }
 
-    settings = nm_settings_get();
-    conns    = nm_settings_get_connections(settings, &n);
-    for (i = 0; i < n; i++) {
-        NMSettingsConnection *sconn = conns[i];
-        NMConnection         *clone;
-        NMSetting8021x       *s_8021x;
-        NMSettingWireless    *s_wifi;
-        gs_free_error GError *upd_err = NULL;
-        GBytes               *ssid_bytes;
-        gs_free char         *ssid_str = NULL;
+    sconn = nm_settings_get_connection_by_uuid(nm_settings_get(), uuid);
+    if (!sconn) {
+        _NMLOG(LOGL_WARN, "update-ca-cert: no connection found for uuid=%s", uuid);
+        return;
+    }
 
-        if (!sconn)
-            continue;
-        s_wifi     = nm_connection_get_setting_wireless(nm_settings_connection_get_connection(sconn));
-        if (!s_wifi)
-            continue;
-        ssid_bytes = nm_setting_wireless_get_ssid(s_wifi);
-        ssid_str   = ssid_bytes ? _nm_utils_ssid_to_utf8(ssid_bytes) : NULL;
-        if (!nm_streq0(ssid_str, ssid))
-            continue;
-
-        clone   = nm_simple_connection_new_clone(nm_settings_connection_get_connection(sconn));
-        s_8021x = nm_connection_get_setting_802_1x(clone);
-        if (!s_8021x) {
-            _NMLOG(LOGL_WARN, "update-ca-cert: no 802-1x setting for SSID=%s", ssid);
-            g_object_unref(clone);
-            return;
-        }
-
-        if (!nm_setting_802_1x_set_ca_cert(s_8021x,
-                                            pem_path,
-                                            NM_SETTING_802_1X_CK_SCHEME_PATH,
-                                            NULL,
-                                            &upd_err)) {
-            _NMLOG(LOGL_WARN,
-                   "update-ca-cert: set_ca_cert failed for SSID=%s: %s",
-                   ssid,
-                   upd_err->message);
-            g_object_unref(clone);
-            return;
-        }
-
-        if (!nm_settings_connection_update(sconn,
-                                           NULL,
-                                           clone,
-                                           NM_SETTINGS_CONNECTION_PERSIST_MODE_TO_DISK,
-                                           NM_SETTINGS_CONNECTION_INT_FLAGS_NONE,
-                                           NM_SETTINGS_CONNECTION_INT_FLAGS_NONE,
-                                           NM_SETTINGS_CONNECTION_UPDATE_REASON_UPDATE_NON_SECRET,
-                                           "tofu",
-                                           &upd_err)) {
-            _NMLOG(LOGL_WARN, "update-ca-cert: save failed for SSID=%s: %s", ssid, upd_err->message);
-        } else {
-            _NMLOG(LOGL_INFO, "update-ca-cert: set ca-cert=%s for SSID=%s", pem_path, ssid);
-        }
+    clone   = nm_simple_connection_new_clone(nm_settings_connection_get_connection(sconn));
+    s_8021x = nm_connection_get_setting_802_1x(clone);
+    if (!s_8021x) {
+        _NMLOG(LOGL_WARN, "update-ca-cert: no 802-1x setting for uuid=%s", uuid);
         g_object_unref(clone);
         return;
     }
-    _NMLOG(LOGL_WARN, "update-ca-cert: no connection found for SSID=%s", ssid);
+
+    if (!nm_setting_802_1x_set_ca_cert(s_8021x,
+                                        pem_path,
+                                        NM_SETTING_802_1X_CK_SCHEME_PATH,
+                                        NULL,
+                                        &upd_err)) {
+        _NMLOG(LOGL_WARN,
+               "update-ca-cert: set_ca_cert failed for uuid=%s: %s",
+               uuid,
+               upd_err->message);
+        g_object_unref(clone);
+        return;
+    }
+
+    if (!nm_settings_connection_update(sconn,
+                                       NULL,
+                                       clone,
+                                       NM_SETTINGS_CONNECTION_PERSIST_MODE_TO_DISK,
+                                       NM_SETTINGS_CONNECTION_INT_FLAGS_NONE,
+                                       NM_SETTINGS_CONNECTION_INT_FLAGS_NONE,
+                                       NM_SETTINGS_CONNECTION_UPDATE_REASON_UPDATE_NON_SECRET,
+                                       "tofu",
+                                       &upd_err)) {
+        _NMLOG(LOGL_WARN, "update-ca-cert: save failed for uuid=%s: %s", uuid, upd_err->message);
+    } else {
+        _NMLOG(LOGL_INFO, "update-ca-cert: set ca-cert=%s for uuid=%s", pem_path, uuid);
+    }
+    g_object_unref(clone);
 }
 
 /*
@@ -684,82 +591,65 @@ tofu_update_ca_cert(const char *ssid)
  * ca-cert field, using the SERVER_HASH scheme, then save to disk.
  */
 static void
-tofu_update_ca_cert_hash(const char *ssid, const char *hash_hex)
+tofu_update_ca_cert_hash(const char *uuid, const char *hash_hex)
 {
-    gs_free char *hash_uri = NULL;
-    NMSettings   *settings;
-    NMSettingsConnection *const *conns;
-    guint         n, i;
+    gs_free char         *hash_uri = NULL;
+    NMSettingsConnection *sconn;
+    NMConnection         *clone;
+    NMSetting8021x       *s_8021x;
+    gs_free_error GError *upd_err = NULL;
 
     if (!hash_hex || !*hash_hex) {
-        _NMLOG(LOGL_WARN, "update-ca-cert-hash: empty hash for SSID=%s", ssid);
+        _NMLOG(LOGL_WARN, "update-ca-cert-hash: empty hash for uuid=%s", uuid);
         return;
     }
 
     hash_uri = g_strdup_printf("hash://server/sha256/%s", hash_hex);
 
-    settings = nm_settings_get();
-    conns    = nm_settings_get_connections(settings, &n);
-    for (i = 0; i < n; i++) {
-        NMSettingsConnection *sconn = conns[i];
-        NMConnection         *clone;
-        NMSetting8021x       *s_8021x;
-        NMSettingWireless    *s_wifi;
-        gs_free_error GError *upd_err = NULL;
-        GBytes               *ssid_bytes;
-        gs_free char         *ssid_str = NULL;
+    sconn = nm_settings_get_connection_by_uuid(nm_settings_get(), uuid);
+    if (!sconn) {
+        _NMLOG(LOGL_WARN, "update-ca-cert-hash: no connection found for uuid=%s", uuid);
+        return;
+    }
 
-        if (!sconn)
-            continue;
-        s_wifi     = nm_connection_get_setting_wireless(nm_settings_connection_get_connection(sconn));
-        if (!s_wifi)
-            continue;
-        ssid_bytes = nm_setting_wireless_get_ssid(s_wifi);
-        ssid_str   = ssid_bytes ? _nm_utils_ssid_to_utf8(ssid_bytes) : NULL;
-        if (!nm_streq0(ssid_str, ssid))
-            continue;
-
-        clone   = nm_simple_connection_new_clone(nm_settings_connection_get_connection(sconn));
-        s_8021x = nm_connection_get_setting_802_1x(clone);
-        if (!s_8021x) {
-            _NMLOG(LOGL_WARN, "update-ca-cert-hash: no 802-1x setting for SSID=%s", ssid);
-            g_object_unref(clone);
-            return;
-        }
-
-        if (!nm_setting_802_1x_set_ca_cert(s_8021x,
-                                            hash_uri,
-                                            NM_SETTING_802_1X_CK_SCHEME_SERVER_HASH,
-                                            NULL,
-                                            &upd_err)) {
-            _NMLOG(LOGL_WARN,
-                   "update-ca-cert-hash: set_ca_cert failed for SSID=%s: %s",
-                   ssid,
-                   upd_err->message);
-            g_object_unref(clone);
-            return;
-        }
-
-        if (!nm_settings_connection_update(sconn,
-                                           NULL,
-                                           clone,
-                                           NM_SETTINGS_CONNECTION_PERSIST_MODE_TO_DISK,
-                                           NM_SETTINGS_CONNECTION_INT_FLAGS_NONE,
-                                           NM_SETTINGS_CONNECTION_INT_FLAGS_NONE,
-                                           NM_SETTINGS_CONNECTION_UPDATE_REASON_UPDATE_NON_SECRET,
-                                           "tofu",
-                                           &upd_err)) {
-            _NMLOG(LOGL_WARN,
-                   "update-ca-cert-hash: save failed for SSID=%s: %s",
-                   ssid,
-                   upd_err->message);
-        } else {
-            _NMLOG(LOGL_INFO, "update-ca-cert-hash: set ca-cert=%s for SSID=%s", hash_uri, ssid);
-        }
+    clone   = nm_simple_connection_new_clone(nm_settings_connection_get_connection(sconn));
+    s_8021x = nm_connection_get_setting_802_1x(clone);
+    if (!s_8021x) {
+        _NMLOG(LOGL_WARN, "update-ca-cert-hash: no 802-1x setting for uuid=%s", uuid);
         g_object_unref(clone);
         return;
     }
-    _NMLOG(LOGL_WARN, "update-ca-cert-hash: no connection found for SSID=%s", ssid);
+
+    if (!nm_setting_802_1x_set_ca_cert(s_8021x,
+                                        hash_uri,
+                                        NM_SETTING_802_1X_CK_SCHEME_SERVER_HASH,
+                                        NULL,
+                                        &upd_err)) {
+        _NMLOG(LOGL_WARN,
+               "update-ca-cert-hash: set_ca_cert failed for uuid=%s: %s",
+               uuid,
+               upd_err->message);
+        g_object_unref(clone);
+        return;
+    }
+
+    if (!nm_settings_connection_update(sconn,
+                                       NULL,
+                                       clone,
+                                       NM_SETTINGS_CONNECTION_PERSIST_MODE_TO_DISK,
+                                       NM_SETTINGS_CONNECTION_INT_FLAGS_NONE,
+                                       NM_SETTINGS_CONNECTION_INT_FLAGS_NONE,
+                                       NM_SETTINGS_CONNECTION_UPDATE_REASON_UPDATE_NON_SECRET,
+                                       "tofu",
+                                       &upd_err)) {
+        _NMLOG(LOGL_WARN,
+               "update-ca-cert-hash: save failed for uuid=%s: %s",
+               uuid,
+               upd_err->message);
+    } else {
+        _NMLOG(LOGL_INFO, "update-ca-cert-hash: set ca-cert=%s for uuid=%s", hash_uri, uuid);
+    }
+    g_object_unref(clone);
 }
 
 /*****************************************************************************/
@@ -792,7 +682,7 @@ tofu_on_agent_response(gboolean accepted, const char *ssid, gpointer user_data)
     if (accepted) {
         gboolean         has_ca_chain = FALSE;
         NMTOFUCertInfo  *leaf         = NULL;
-        gs_free char    *snap_ssid    = g_strdup(s_ssid);
+        gs_free char    *snap_uuid    = g_strdup(s_uuid);
         guint            i;
 
         if (s_observed_certs) {
@@ -809,23 +699,24 @@ tofu_on_agent_response(gboolean accepted, const char *ssid, gpointer user_data)
         if (!has_ca_chain && leaf) {
             /* Only leaf cert observed — pin it on the connection profile via
              * ca-cert=hash://server/sha256/<hex>, then reconnect. */
-            tofu_update_ca_cert_hash(snap_ssid, leaf->hash);
+            tofu_update_ca_cert_hash(snap_uuid, leaf->hash);
             nm_tofu_reset_session();
-            tofu_set_autoconnect_for_ssid(snap_ssid, TRUE);
-            tofu_authenticate_connection_by_ssid(snap_ssid);
+            tofu_set_autoconnect_for_uuid(snap_uuid, TRUE);
+            tofu_authenticate_connection_by_uuid(snap_uuid);
         } else {
             /* CA chain present — update connection profile with root CA, then reconnect. */
-            tofu_update_ca_cert(snap_ssid);
+            tofu_update_ca_cert(snap_uuid);
             nm_tofu_reset_session();
-            tofu_set_autoconnect_for_ssid(snap_ssid, TRUE);
-            tofu_add_timestamp_to_connection(snap_ssid);
-            tofu_authenticate_connection_by_ssid(snap_ssid);
+            tofu_set_autoconnect_for_uuid(snap_uuid, TRUE);
+            tofu_add_timestamp_to_connection(snap_uuid);
+            tofu_authenticate_connection_by_uuid(snap_uuid);
         }
     } else {
+        gs_free char *snap_uuid = g_strdup(s_uuid);
         gs_free char *snap_ssid = g_strdup(s_ssid);
 
         nm_tofu_reset_session();
-        tofu_remove_connection(snap_ssid);
+        tofu_remove_connection(snap_uuid);
         _NMLOG(LOGL_INFO, "user rejected cert; profile removed for SSID=%s", snap_ssid);
     }
 }
@@ -971,8 +862,8 @@ static void
 tofu_stage3(void)
 {
     /* Disconnect while user reviews; prevent reconnect loop. */
-    tofu_deauthenticate_connection_by_ssid(s_ssid);
-    tofu_set_autoconnect_for_ssid(s_ssid, FALSE);
+    tofu_deauthenticate_connection_by_uuid(s_uuid);
+    tofu_set_autoconnect_for_uuid(s_uuid, FALSE);
 
     tofu_parse_and_dispatch(
         _("Review the server certificate details below before trusting this network."));
