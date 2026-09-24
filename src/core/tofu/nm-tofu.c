@@ -43,8 +43,6 @@
 #define _NMLOG(level, ...) \
     nm_log((level), (_NMLOG_DOMAIN), NULL, NULL, "tofu: " __VA_ARGS__)
 
-/* Trusted-cert keyfile store under NM's state directory. */
-#define TOFU_CERT_STORE NMSTATEDIR "/tofu-trusted-certs.keyfile"
 #define TOFU_CERT_DIR   NMSTATEDIR "/tofu"
 
 /*****************************************************************************/
@@ -133,168 +131,6 @@ nm_tofu_reset_session(void)
     s_session_type = NM_TOFU_SESSION_TYPE_DEFAULT;
 
     _NMLOG(LOGL_DEBUG, "session reset");
-}
-
-/*****************************************************************************/
-/* Trusted-cert keyfile store                                                  */
-
-gboolean
-nm_tofu_mark_server_cert_as_trusted(const char *uuid, const char *cert_hash)
-{
-    nm_auto_unref_keyfile GKeyFile *kf    = NULL;
-    gs_free_error GError           *error = NULL;
-    gs_free char                   *data  = NULL;
-    gsize                           length;
-
-    g_return_val_if_fail(uuid && *uuid, FALSE);
-    g_return_val_if_fail(cert_hash && *cert_hash, FALSE);
-
-    kf = g_key_file_new();
-
-    if (g_file_test(TOFU_CERT_STORE, G_FILE_TEST_EXISTS)) {
-        if (!g_key_file_load_from_file(kf, TOFU_CERT_STORE, G_KEY_FILE_NONE, &error)) {
-            _NMLOG(LOGL_WARN, "cannot load cert store: %s", error->message);
-            return FALSE;
-        }
-    }
-
-    g_key_file_set_string(kf, uuid, "cert_hash", cert_hash);
-
-    data = g_key_file_to_data(kf, &length, NULL);
-
-    if (g_mkdir_with_parents(NMSTATEDIR, 0700) < 0) {
-        _NMLOG(LOGL_WARN, "cannot create state dir " NMSTATEDIR);
-        return FALSE;
-    }
-
-    if (!g_file_set_contents(TOFU_CERT_STORE, data, (gssize) length, &error)) {
-        _NMLOG(LOGL_WARN, "cannot write cert store: %s", error->message);
-        return FALSE;
-    }
-
-    _NMLOG(LOGL_INFO, "pinned cert for uuid=%s hash=%.16s...", uuid, cert_hash);
-    return TRUE;
-}
-
-gboolean
-nm_tofu_has_pinned_leaf_hash(const char *uuid)
-{
-    nm_auto_unref_keyfile GKeyFile *kf    = NULL;
-    gs_free_error GError           *error = NULL;
-
-    g_return_val_if_fail(uuid && *uuid, FALSE);
-
-    if (!g_file_test(TOFU_CERT_STORE, G_FILE_TEST_EXISTS))
-        return FALSE;
-
-    kf = g_key_file_new();
-    if (!g_key_file_load_from_file(kf, TOFU_CERT_STORE, G_KEY_FILE_NONE, &error)) {
-        _NMLOG(LOGL_WARN, "cannot load cert store: %s", error->message);
-        return FALSE;
-    }
-
-    return g_key_file_has_group(kf, uuid);
-}
-
-gboolean
-nm_tofu_is_cert_hash_trusted(const char *uuid, const char *observed_hash)
-{
-    nm_auto_unref_keyfile GKeyFile *kf          = NULL;
-    gs_free_error GError           *error       = NULL;
-    gs_free char                   *stored_hash = NULL;
-
-    g_return_val_if_fail(uuid && *uuid, FALSE);
-    g_return_val_if_fail(observed_hash && *observed_hash, FALSE);
-
-    if (!g_file_test(TOFU_CERT_STORE, G_FILE_TEST_EXISTS))
-        return FALSE;
-
-    kf = g_key_file_new();
-    if (!g_key_file_load_from_file(kf, TOFU_CERT_STORE, G_KEY_FILE_NONE, &error)) {
-        _NMLOG(LOGL_WARN, "cannot load cert store: %s", error->message);
-        return FALSE;
-    }
-
-    if (!g_key_file_has_group(kf, uuid))
-        return FALSE;
-
-    stored_hash = g_key_file_get_string(kf, uuid, "cert_hash", &error);
-    if (!stored_hash) {
-        _NMLOG(LOGL_WARN,
-               "no cert_hash for uuid=%s: %s",
-               uuid,
-               error ? error->message : "(unknown)");
-        return FALSE;
-    }
-
-    return nm_streq(stored_hash, observed_hash);
-}
-
-void
-nm_tofu_remove_server_cert_from_trusted(const char *uuid)
-{
-    nm_auto_unref_keyfile GKeyFile *kf    = NULL;
-    gs_free_error GError           *error = NULL;
-    gs_free char                   *data  = NULL;
-
-    if (!uuid || !*uuid) {
-        _NMLOG(LOGL_WARN, "remove_trusted: UUID is empty");
-        return;
-    }
-
-    if (!g_file_test(TOFU_CERT_STORE, G_FILE_TEST_EXISTS))
-        return;
-
-    kf = g_key_file_new();
-    if (!g_key_file_load_from_file(kf, TOFU_CERT_STORE, G_KEY_FILE_NONE, &error)) {
-        _NMLOG(LOGL_WARN, "cannot load cert store: %s", error->message);
-        return;
-    }
-
-    if (!g_key_file_has_group(kf, uuid)) {
-        _NMLOG(LOGL_DEBUG, "uuid=%s not in cert store, nothing to remove", uuid);
-        return;
-    }
-
-    g_key_file_remove_group(kf, uuid, NULL);
-
-    data = g_key_file_to_data(kf, NULL, NULL);
-    if (!g_file_set_contents(TOFU_CERT_STORE, data, -1, &error))
-        _NMLOG(LOGL_WARN, "cannot update cert store after remove: %s", error->message);
-    else
-        _NMLOG(LOGL_INFO, "removed pinned cert for uuid=%s", uuid);
-}
-
-/*
- * nm_tofu_get_stored_cert_hash:
- * @uuid: connection UUID
- *
- * Returns the pinned leaf cert SHA-256 hex string stored for @uuid, or NULL
- * if none.  Caller must g_free() the returned string.
- */
-char *
-nm_tofu_get_stored_cert_hash(const char *uuid)
-{
-    nm_auto_unref_keyfile GKeyFile *kf    = NULL;
-    gs_free_error GError           *error = NULL;
-    char                           *hash;
-
-    g_return_val_if_fail(uuid && *uuid, NULL);
-
-    if (!g_file_test(TOFU_CERT_STORE, G_FILE_TEST_EXISTS))
-        return NULL;
-
-    kf = g_key_file_new();
-    if (!g_key_file_load_from_file(kf, TOFU_CERT_STORE, G_KEY_FILE_NONE, &error)) {
-        _NMLOG(LOGL_WARN, "get_stored_hash: cannot load cert store: %s", error->message);
-        return NULL;
-    }
-
-    hash = g_key_file_get_string(kf, uuid, "cert_hash", &error);
-    if (!hash)
-        _NMLOG(LOGL_DEBUG, "get_stored_hash: no cert_hash for uuid=%s: %s", uuid, error->message);
-
-    return hash;
 }
 
 /*****************************************************************************/
@@ -843,6 +679,89 @@ tofu_update_ca_cert(const char *ssid)
     _NMLOG(LOGL_WARN, "update-ca-cert: no connection found for SSID=%s", ssid);
 }
 
+/*
+ * Pin a leaf-only observed cert directly on the connection profile's 802-1x
+ * ca-cert field, using the SERVER_HASH scheme, then save to disk.
+ */
+static void
+tofu_update_ca_cert_hash(const char *ssid, const char *hash_hex)
+{
+    gs_free char *hash_uri = NULL;
+    NMSettings   *settings;
+    NMSettingsConnection *const *conns;
+    guint         n, i;
+
+    if (!hash_hex || !*hash_hex) {
+        _NMLOG(LOGL_WARN, "update-ca-cert-hash: empty hash for SSID=%s", ssid);
+        return;
+    }
+
+    hash_uri = g_strdup_printf("hash://server/sha256/%s", hash_hex);
+
+    settings = nm_settings_get();
+    conns    = nm_settings_get_connections(settings, &n);
+    for (i = 0; i < n; i++) {
+        NMSettingsConnection *sconn = conns[i];
+        NMConnection         *clone;
+        NMSetting8021x       *s_8021x;
+        NMSettingWireless    *s_wifi;
+        gs_free_error GError *upd_err = NULL;
+        GBytes               *ssid_bytes;
+        gs_free char         *ssid_str = NULL;
+
+        if (!sconn)
+            continue;
+        s_wifi     = nm_connection_get_setting_wireless(nm_settings_connection_get_connection(sconn));
+        if (!s_wifi)
+            continue;
+        ssid_bytes = nm_setting_wireless_get_ssid(s_wifi);
+        ssid_str   = ssid_bytes ? _nm_utils_ssid_to_utf8(ssid_bytes) : NULL;
+        if (!nm_streq0(ssid_str, ssid))
+            continue;
+
+        clone   = nm_simple_connection_new_clone(nm_settings_connection_get_connection(sconn));
+        s_8021x = nm_connection_get_setting_802_1x(clone);
+        if (!s_8021x) {
+            _NMLOG(LOGL_WARN, "update-ca-cert-hash: no 802-1x setting for SSID=%s", ssid);
+            g_object_unref(clone);
+            return;
+        }
+
+        if (!nm_setting_802_1x_set_ca_cert(s_8021x,
+                                            hash_uri,
+                                            NM_SETTING_802_1X_CK_SCHEME_SERVER_HASH,
+                                            NULL,
+                                            &upd_err)) {
+            _NMLOG(LOGL_WARN,
+                   "update-ca-cert-hash: set_ca_cert failed for SSID=%s: %s",
+                   ssid,
+                   upd_err->message);
+            g_object_unref(clone);
+            return;
+        }
+
+        if (!nm_settings_connection_update(sconn,
+                                           NULL,
+                                           clone,
+                                           NM_SETTINGS_CONNECTION_PERSIST_MODE_TO_DISK,
+                                           NM_SETTINGS_CONNECTION_INT_FLAGS_NONE,
+                                           NM_SETTINGS_CONNECTION_INT_FLAGS_NONE,
+                                           NM_SETTINGS_CONNECTION_UPDATE_REASON_UPDATE_NON_SECRET,
+                                           "tofu",
+                                           &upd_err)) {
+            _NMLOG(LOGL_WARN,
+                   "update-ca-cert-hash: save failed for SSID=%s: %s",
+                   ssid,
+                   upd_err->message);
+        } else {
+            _NMLOG(LOGL_INFO, "update-ca-cert-hash: set ca-cert=%s for SSID=%s", hash_uri, ssid);
+        }
+        g_object_unref(clone);
+        return;
+    }
+    _NMLOG(LOGL_WARN, "update-ca-cert-hash: no connection found for SSID=%s", ssid);
+}
+
 /*****************************************************************************/
 /* Stage 3: parse cert + dispatch to agent                                     */
 
@@ -874,7 +793,6 @@ tofu_on_agent_response(gboolean accepted, const char *ssid, gpointer user_data)
         gboolean         has_ca_chain = FALSE;
         NMTOFUCertInfo  *leaf         = NULL;
         gs_free char    *snap_ssid    = g_strdup(s_ssid);
-        gs_free char    *snap_uuid    = g_strdup(s_uuid);
         guint            i;
 
         if (s_observed_certs) {
@@ -889,8 +807,9 @@ tofu_on_agent_response(gboolean accepted, const char *ssid, gpointer user_data)
         }
 
         if (!has_ca_chain && leaf) {
-            /* Only leaf cert — pin hash, then reconnect. */
-            nm_tofu_mark_server_cert_as_trusted(snap_uuid, leaf->hash);
+            /* Only leaf cert observed — pin it on the connection profile via
+             * ca-cert=hash://server/sha256/<hex>, then reconnect. */
+            tofu_update_ca_cert_hash(snap_ssid, leaf->hash);
             nm_tofu_reset_session();
             tofu_set_autoconnect_for_ssid(snap_ssid, TRUE);
             tofu_authenticate_connection_by_ssid(snap_ssid);
@@ -905,7 +824,6 @@ tofu_on_agent_response(gboolean accepted, const char *ssid, gpointer user_data)
     } else {
         gs_free char *snap_ssid = g_strdup(s_ssid);
 
-        nm_tofu_remove_server_cert_from_trusted(s_uuid);
         nm_tofu_reset_session();
         tofu_remove_connection(snap_ssid);
         _NMLOG(LOGL_INFO, "user rejected cert; profile removed for SSID=%s", snap_ssid);

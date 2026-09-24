@@ -73,15 +73,4 @@ void              nm_tofu_reset_session(void);
 
 void nm_tofu_stage2_cert_signal(GVariant *parameters);
 
-/*****************************************************************************/
-/* Trusted cert keyfile store                                                 */
-
-gboolean nm_tofu_mark_server_cert_as_trusted(const char *uuid,
-                                              const char *cert_hash);
-gboolean nm_tofu_has_pinned_leaf_hash(const char *uuid);
-gboolean nm_tofu_is_cert_hash_trusted(const char *uuid,
-                                       const char *observed_hash);
-void     nm_tofu_remove_server_cert_from_trusted(const char *uuid);
-char    *nm_tofu_get_stored_cert_hash(const char *uuid);
-
 #endif /* NM_TOFU_H */
