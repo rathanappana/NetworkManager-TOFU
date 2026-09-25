@@ -125,6 +125,15 @@ case "$ans" in
     *) chain_send_mode="full" ;;
 esac
 
+# Test knob for the "AP already sent a self-signed root, but is it ALSO in
+# the system trust store" confidence check in tofu_resolve_self_signed_root().
+# Installs the bootstrap root (ca.pem) into /usr/local/share/ca-certificates
+# so that path can be exercised on demand, then removed again on exit.
+install_root_trust="n"
+SYSTEM_CA_NAME="tofu-sim-root-ca.crt"
+read -rp "Install the root CA into the system trust store too, to test the trust-store confidence check? [y/N] " ans
+[[ "$ans" =~ ^[Yy]$ ]] && install_root_trust="y"
+
 # Cleanup trap: stop hostapd and virtual hardware, but keep the persistent
 # cert directory and the connection profile so results can be inspected
 # (and the pinned-cert re-TOFU path can be tested by rerunning) after exit.
@@ -133,6 +142,15 @@ cleanup() {
     echo "Cleaning up test environment..."
     [ -n "${HOSTAPD_PID:-}" ] && kill "$HOSTAPD_PID" 2>/dev/null || true
     modprobe -r mac80211_hwsim 2>/dev/null || true
+    if [ "${install_root_trust:-n}" = "y" ] && [ -f "/usr/local/share/ca-certificates/$SYSTEM_CA_NAME" ]; then
+        rm -f "/usr/local/share/ca-certificates/$SYSTEM_CA_NAME"
+        # Plain update-ca-certificates leaves a stale entry in
+        # /etc/ca-certificates.conf when the source .crt disappears, so the
+        # derived /etc/ssl/certs/*.pem symlink survives too. --fresh forces a
+        # full rebuild from what's actually present on disk right now.
+        update-ca-certificates --fresh > /dev/null 2>&1 || true
+        echo "Removed $SYSTEM_CA_NAME from the system trust store."
+    fi
     echo "Done. Cert dir kept at $CERT_DIR; connection profile '$CON_NAME' left in place."
 }
 trap cleanup EXIT
@@ -211,6 +229,12 @@ fi
 if [ ! -f "$FR_DIR/server.crt" ] || [ ! -f "$FR_DIR/ca.pem" ] || [ ! -f "$FR_DIR/server.key" ]; then
     echo "Error: expected $FR_DIR/{server.crt,ca.pem,server.key} not found after bootstrap."
     exit 1
+fi
+
+if [ "$install_root_trust" = "y" ]; then
+    cp "$FR_DIR/ca.pem" "/usr/local/share/ca-certificates/$SYSTEM_CA_NAME"
+    update-ca-certificates > /dev/null
+    echo "  -> Installed root CA into system trust store: /usr/local/share/ca-certificates/$SYSTEM_CA_NAME"
 fi
 
 if [ "$build_chain" = "y" ] && { [ "$recreate_certs" = "y" ] || [ ! -f "$FR_DIR/server2.crt" ]; }; then
