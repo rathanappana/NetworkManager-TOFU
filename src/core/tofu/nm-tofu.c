@@ -52,6 +52,11 @@ static NMTOFUSessionType  s_session_type   = NM_TOFU_SESSION_TYPE_DEFAULT;
 static char              *s_ssid           = NULL;
 static char              *s_uuid           = NULL;
 static NMTOFUCertSession *s_observed_certs = NULL; /* certs from wpa_supplicant */
+static GBytes            *s_resolved_root  = NULL; /* raw DER of the resolved
+                                                     * self-signed root — set once
+                                                     * in tofu_stage3(), reused by
+                                                     * both display and pin so
+                                                     * they always agree */
 
 /*****************************************************************************/
 /* NMTOFUCertInfo / NMTOFUCertSession lifetime                                */
@@ -126,6 +131,7 @@ nm_tofu_reset_session(void)
         return;
 
     nm_clear_pointer(&s_observed_certs, cert_session_free);
+    nm_clear_pointer(&s_resolved_root, g_bytes_unref);
     nm_clear_g_free(&s_ssid);
     nm_clear_g_free(&s_uuid);
     s_session_type = NM_TOFU_SESSION_TYPE_DEFAULT;
@@ -147,10 +153,7 @@ extract_san_dnsnames(GBytes *cert_data)
     gnutls_x509_crt_t  crt;
     gnutls_datum_t     datum;
     GPtrArray         *names;
-    unsigned int       idx     = 0;
-    void              *san_buf = NULL;
-    size_t             san_len;
-    unsigned int       san_type;
+    unsigned int       idx = 0;
     char               cn_buf[256];
     size_t             cn_len = sizeof(cn_buf);
 
@@ -173,12 +176,39 @@ extract_san_dnsnames(GBytes *cert_data)
         return names;
     }
 
-    while (gnutls_x509_crt_get_subject_alt_name(crt, idx, &san_buf, &san_len, &san_type)
-           == GNUTLS_E_SUCCESS) {
-        if (san_type == GNUTLS_SAN_DNSNAME || san_type == GNUTLS_SAN_URI)
+    /* gnutls_x509_crt_get_subject_alt_name() takes a caller-allocated
+     * buffer, not an auto-allocated one — a NULL/zero-size buffer always
+     * fails with GNUTLS_E_SHORT_MEMORY_BUFFER rather than allocating, so
+     * this needs the standard probe-then-fetch two-call pattern. Also uses
+     * the _2 variant, which is the one that actually reports @san_type —
+     * the plain variant's 5th parameter is @critical, not @san_type. */
+    for (;;) {
+        size_t         san_len = 0;
+        unsigned int   san_type, critical;
+        gs_free char  *san_buf = NULL;
+        int            rc;
+
+        rc = gnutls_x509_crt_get_subject_alt_name2(crt, idx, NULL, &san_len, &san_type, &critical);
+        if (rc != GNUTLS_E_SHORT_MEMORY_BUFFER)
+            break;
+
+        san_buf = g_malloc(san_len);
+        rc = gnutls_x509_crt_get_subject_alt_name2(crt,
+                                                    idx,
+                                                    san_buf,
+                                                    &san_len,
+                                                    &san_type,
+                                                    &critical);
+        if (rc < 0)
+            break;
+
+        /* wpa_supplicant's own domain_match (tls_match_suffix_helper() in
+         * tls_openssl.c) only ever checks SAN dNSName entries — never URI —
+         * and falls back to CN only when the cert has zero dNSName entries
+         * at all. Match that exactly, so what NM extracts here is always
+         * something wpa_supplicant's own matcher will actually consider. */
+        if (san_type == GNUTLS_SAN_DNSNAME)
             g_ptr_array_add(names, g_strndup(san_buf, san_len));
-        gnutls_free(san_buf);
-        san_buf = NULL;
         idx++;
     }
 
@@ -206,73 +236,91 @@ static void tofu_set_autoconnect_for_uuid(const char *uuid_target, gboolean enab
 /* Connection management helpers (all static — only called within this file)   */
 
 /*
- * Save every observed non-leaf cert (all intermediates plus whatever the AP
- * sent as root) as a concatenated PEM file in TOFU_CERT_DIR, then extend it
- * further via the system trust store from the highest-depth observed cert,
- * appending issuers until a self-signed root or the store has no more.
- * Previously this only saved the single highest-depth observed cert
- * (typically the root), silently dropping any intermediate(s) between it
- * and the leaf — which then made leaf verification against the saved file
- * fail for any chain that isn't leaf-signed-directly-by-root.  Returns
- * owned path.
+ * Find the self-signed root CA for this session: first checks whichever
+ * non-leaf certs the AP actually sent; if none of those is self-signed,
+ * walks up from the highest-depth one via the system trust store (completes
+ * chains like HARICA's, where "HARICA TLS RSA Root CA 2021" is itself
+ * cross-signed by an older "...RootCA 2015" that isn't sent over the wire
+ * but is present in the OS's own ca-certificates bundle).
+ *
+ * Only this one self-signed cert is ever needed locally, regardless of how
+ * many intermediates the AP sends — wpa_supplicant completes the rest of
+ * the path itself using whatever non-root certs arrive over the wire, on
+ * every connection attempt alike. Returns owned raw DER bytes of the found
+ * self-signed cert, or NULL if none could be found at all (caller falls
+ * back to leaf-hash pinning).
+ * @out_via_system_trust: if non-NULL, set to TRUE when the root was found
+ * via the system trust store rather than sent by the AP itself — lets the
+ * caller tell the user their OS already recognizes this CA, for extra
+ * confidence in the disclaimer text.
  */
-static char *
-tofu_save_cert_chain_as_pem(NMTOFUCertSession *observed_session, GError **error)
+static GBytes *
+tofu_resolve_self_signed_root(NMTOFUCertSession *observed_session, gboolean *out_via_system_trust)
 {
-    GString        *pem_out = g_string_new(NULL);
-    NMTOFUCertInfo *top     = NULL;
-    gs_free char   *path    = NULL;
+    NMTOFUCertInfo *top = NULL;
     guint           i;
+
+    if (out_via_system_trust)
+        *out_via_system_trust = FALSE;
 
     g_return_val_if_fail(observed_session && observed_session->certs, NULL);
 
     for (i = 0; i < observed_session->certs->len; i++) {
         NMTOFUCertInfo    *info = g_ptr_array_index(observed_session->certs, i);
         gnutls_x509_crt_t  crt;
-        gnutls_datum_t     datum, pem_datum = {};
-        const guint8      *raw;
-        gsize              raw_len;
+        gnutls_datum_t     datum;
+        gboolean           self_signed = FALSE;
 
         if (!info || info->depth == 0 || !info->cert_data)
             continue;
 
-        raw   = g_bytes_get_data(info->cert_data, &raw_len);
-        datum = (gnutls_datum_t){.data = (unsigned char *) raw, .size = (unsigned int) raw_len};
+        datum.data = (unsigned char *) g_bytes_get_data(info->cert_data, NULL);
+        datum.size = (unsigned int) g_bytes_get_size(info->cert_data);
 
         gnutls_x509_crt_init(&crt);
-        if (gnutls_x509_crt_import(crt, &datum, GNUTLS_X509_FMT_DER) == GNUTLS_E_SUCCESS
-            && gnutls_x509_crt_export2(crt, GNUTLS_X509_FMT_PEM, &pem_datum) == GNUTLS_E_SUCCESS) {
-            g_string_append_len(pem_out, (char *) pem_datum.data, (gssize) pem_datum.size);
-            gnutls_free(pem_datum.data);
+        if (gnutls_x509_crt_import(crt, &datum, GNUTLS_X509_FMT_DER) == GNUTLS_E_SUCCESS) {
+            char   subj_buf[256] = {0};
+            char   issr_buf[256] = {0};
+            size_t subj_len      = sizeof(subj_buf);
+            size_t issr_len      = sizeof(issr_buf);
+
+            gnutls_x509_crt_get_dn(crt, subj_buf, &subj_len);
+            gnutls_x509_crt_get_issuer_dn(crt, issr_buf, &issr_len);
+            self_signed = gnutls_x509_crt_check_issuer(crt, crt) != 0;
+
+            _NMLOG(LOGL_DEBUG,
+                   "resolve-root: candidate depth=%u self_signed=%d subject='%s' issuer='%s'",
+                   info->depth,
+                   (int) self_signed,
+                   subj_buf,
+                   issr_buf);
+        } else {
+            _NMLOG(LOGL_DEBUG, "resolve-root: candidate depth=%u DER import failed", info->depth);
         }
         gnutls_x509_crt_deinit(crt);
+
+        if (self_signed) {
+            _NMLOG(LOGL_DEBUG, "resolve-root: AP sent its own self-signed root at depth=%u", info->depth);
+            return g_bytes_ref(info->cert_data);
+        }
 
         if (!top || info->depth > top->depth)
             top = info;
     }
 
-    if (pem_out->len == 0 || !top) {
-        g_set_error(error,
-                    G_IO_ERROR,
-                    G_IO_ERROR_FAILED,
-                    "no non-leaf certs observed to save");
-        g_string_free(pem_out, TRUE);
+    if (!top)
         return NULL;
-    }
 
-    /* Walk up further via the system trust store from the highest-depth
-     * observed cert, appending each issuer until we reach a self-signed
-     * root or the store has no more issuers — completes the chain when the
-     * AP itself didn't send the actual root. */
+    /* AP didn't send a self-signed root itself — walk up from the
+     * highest-depth observed cert via the system trust store. */
     {
         gnutls_x509_crt_t        top_crt;
         gnutls_datum_t           top_datum;
         gnutls_x509_trust_list_t trust_list = NULL;
-        const guint8             *raw;
-        gsize                     raw_len;
+        GBytes                  *result = NULL;
 
-        raw       = g_bytes_get_data(top->cert_data, &raw_len);
-        top_datum = (gnutls_datum_t){.data = (unsigned char *) raw, .size = (unsigned int) raw_len};
+        top_datum.data = (unsigned char *) g_bytes_get_data(top->cert_data, NULL);
+        top_datum.size = (unsigned int) g_bytes_get_size(top->cert_data);
 
         gnutls_x509_crt_init(&top_crt);
         if (gnutls_x509_crt_import(top_crt, &top_datum, GNUTLS_X509_FMT_DER) == GNUTLS_E_SUCCESS) {
@@ -281,9 +329,8 @@ tofu_save_cert_chain_as_pem(NMTOFUCertSession *observed_session, GError **error)
                 gnutls_x509_crt_t current = top_crt;
                 int               depth   = 0;
 
-                while (depth < 10 && !gnutls_x509_crt_check_issuer(current, current)) {
-                    gnutls_x509_crt_t issuer    = NULL;
-                    gnutls_datum_t    pem_datum = {};
+                while (depth < 10) {
+                    gnutls_x509_crt_t issuer = NULL;
                     int               rc;
 
                     rc = gnutls_x509_trust_list_get_issuer(trust_list,
@@ -293,18 +340,21 @@ tofu_save_cert_chain_as_pem(NMTOFUCertSession *observed_session, GError **error)
                     if (rc != GNUTLS_E_SUCCESS || !issuer)
                         break;
 
-                    rc = gnutls_x509_crt_export2(issuer, GNUTLS_X509_FMT_PEM, &pem_datum);
-                    if (rc == GNUTLS_E_SUCCESS) {
-                        g_string_append_len(pem_out,
-                                            (char *) pem_datum.data,
-                                            (gssize) pem_datum.size);
-                        gnutls_free(pem_datum.data);
-                    }
-
                     if (current != top_crt)
                         gnutls_x509_crt_deinit(current);
                     current = issuer;
                     depth++;
+
+                    if (gnutls_x509_crt_check_issuer(current, current)) {
+                        gnutls_datum_t der = {};
+
+                        if (gnutls_x509_crt_export2(current, GNUTLS_X509_FMT_DER, &der)
+                            == GNUTLS_E_SUCCESS) {
+                            result = g_bytes_new(der.data, der.size);
+                            gnutls_free(der.data);
+                        }
+                        break;
+                    }
                 }
 
                 if (current != top_crt)
@@ -313,19 +363,54 @@ tofu_save_cert_chain_as_pem(NMTOFUCertSession *observed_session, GError **error)
             gnutls_x509_trust_list_deinit(trust_list, 0);
         }
         gnutls_x509_crt_deinit(top_crt);
+
+        if (result) {
+            _NMLOG(LOGL_DEBUG, "resolve-root: found self-signed root via system trust store");
+            if (out_via_system_trust)
+                *out_via_system_trust = TRUE;
+        } else {
+            _NMLOG(LOGL_INFO,
+                   "resolve-root: no self-signed root found — AP didn't send one, "
+                   "none in system trust store either");
+        }
+        return result;
     }
+}
+
+/*
+ * Export @root_der (a single self-signed cert) as a PEM file in
+ * TOFU_CERT_DIR. Returns owned path.
+ */
+static char *
+tofu_write_root_pem(GBytes *root_der, GError **error)
+{
+    gs_free char     *path = NULL;
+    gnutls_x509_crt_t crt;
+    gnutls_datum_t    datum, pem_datum = {};
+
+    datum.data = (unsigned char *) g_bytes_get_data(root_der, NULL);
+    datum.size = (unsigned int) g_bytes_get_size(root_der);
+
+    gnutls_x509_crt_init(&crt);
+    if (gnutls_x509_crt_import(crt, &datum, GNUTLS_X509_FMT_DER) != GNUTLS_E_SUCCESS
+        || gnutls_x509_crt_export2(crt, GNUTLS_X509_FMT_PEM, &pem_datum) != GNUTLS_E_SUCCESS) {
+        gnutls_x509_crt_deinit(crt);
+        g_set_error(error, G_IO_ERROR, G_IO_ERROR_FAILED, "failed to export root cert as PEM");
+        return NULL;
+    }
+    gnutls_x509_crt_deinit(crt);
 
     g_mkdir_with_parents(TOFU_CERT_DIR, 0700);
     path = g_strdup_printf("%s/ca-cert-%s.pem",
                            TOFU_CERT_DIR,
                            (s_uuid && *s_uuid) ? s_uuid : "unknown");
-    if (!g_file_set_contents(path, pem_out->str, (gssize) pem_out->len, error)) {
-        g_string_free(pem_out, TRUE);
+    if (!g_file_set_contents(path, (char *) pem_datum.data, (gssize) pem_datum.size, error)) {
+        gnutls_free(pem_datum.data);
         return NULL;
     }
 
-    _NMLOG(LOGL_DEBUG, "saved CA chain PEM (%zu bytes) to %s", pem_out->len, path);
-    g_string_free(pem_out, TRUE);
+    _NMLOG(LOGL_DEBUG, "saved self-signed root PEM (%u bytes) to %s", pem_datum.size, path);
+    gnutls_free(pem_datum.data);
     return g_steal_pointer(&path);
 }
 
@@ -519,11 +604,20 @@ tofu_add_timestamp_to_connection(const char *uuid)
 }
 
 /*
- * Write the root CA from the observed cert chain into the connection profile's
- * 802-1x ca-cert field, then save to disk.
+ * Write the resolved self-signed root (s_resolved_root, set once in
+ * tofu_stage3()) into the connection profile's 802-1x ca-cert field, then
+ * save to disk.
+ *
+ * Returns FALSE when no self-signed root was resolved for this session —
+ * caller falls back to leaf-hash pinning in that case.
+ * @domain: SAN DNS name (or CN fallback) of the observed leaf, or NULL — set
+ * as 802-1x.domain-match alongside ca-cert. A CA-root pin alone trusts any
+ * cert that CA ever issues for any name; domain-match narrows that back down
+ * to the one server actually observed (upstream RFC's stated preference:
+ * CA-hash/pin + domain match, see GitLab NetworkManager#1999).
  */
-static void
-tofu_update_ca_cert(const char *uuid)
+static gboolean
+tofu_update_ca_cert(const char *uuid, const char *domain)
 {
     gs_free char         *pem_path = NULL;
     gs_free_error GError *error = NULL;
@@ -532,21 +626,21 @@ tofu_update_ca_cert(const char *uuid)
     NMSetting8021x       *s_8021x;
     gs_free_error GError *upd_err = NULL;
 
-    if (!s_observed_certs || !s_observed_certs->certs || s_observed_certs->certs->len == 0) {
-        _NMLOG(LOGL_WARN, "update-ca-cert: no certs in session");
-        return;
+    if (!s_resolved_root) {
+        _NMLOG(LOGL_INFO, "update-ca-cert: no self-signed root resolved for this session");
+        return FALSE;
     }
 
-    pem_path = tofu_save_cert_chain_as_pem(s_observed_certs, &error);
+    pem_path = tofu_write_root_pem(s_resolved_root, &error);
     if (!pem_path) {
-        _NMLOG(LOGL_WARN, "update-ca-cert: PEM export failed: %s", error->message);
-        return;
+        _NMLOG(LOGL_WARN, "update-ca-cert: %s", error->message);
+        return FALSE;
     }
 
     sconn = nm_settings_get_connection_by_uuid(nm_settings_get(), uuid);
     if (!sconn) {
         _NMLOG(LOGL_WARN, "update-ca-cert: no connection found for uuid=%s", uuid);
-        return;
+        return FALSE;
     }
 
     clone   = nm_simple_connection_new_clone(nm_settings_connection_get_connection(sconn));
@@ -554,7 +648,7 @@ tofu_update_ca_cert(const char *uuid)
     if (!s_8021x) {
         _NMLOG(LOGL_WARN, "update-ca-cert: no 802-1x setting for uuid=%s", uuid);
         g_object_unref(clone);
-        return;
+        return FALSE;
     }
 
     if (!nm_setting_802_1x_set_ca_cert(s_8021x,
@@ -567,8 +661,11 @@ tofu_update_ca_cert(const char *uuid)
                uuid,
                upd_err->message);
         g_object_unref(clone);
-        return;
+        return FALSE;
     }
+
+    if (domain && *domain)
+        g_object_set(s_8021x, NM_SETTING_802_1X_DOMAIN_MATCH, domain, NULL);
 
     if (!nm_settings_connection_update(sconn,
                                        NULL,
@@ -580,18 +677,29 @@ tofu_update_ca_cert(const char *uuid)
                                        "tofu",
                                        &upd_err)) {
         _NMLOG(LOGL_WARN, "update-ca-cert: save failed for uuid=%s: %s", uuid, upd_err->message);
-    } else {
-        _NMLOG(LOGL_INFO, "update-ca-cert: set ca-cert=%s for uuid=%s", pem_path, uuid);
+        g_object_unref(clone);
+        return FALSE;
     }
+
+    _NMLOG(LOGL_INFO,
+           "update-ca-cert: set ca-cert=%s domain-match=%s for uuid=%s",
+           pem_path,
+           (domain && *domain) ? domain : "(none)",
+           uuid);
     g_object_unref(clone);
+    return TRUE;
 }
 
 /*
  * Pin a leaf-only observed cert directly on the connection profile's 802-1x
  * ca-cert field, using the SERVER_HASH scheme, then save to disk.
+ * @domain: SAN DNS name (or CN fallback) of the observed leaf, or NULL — set
+ * as 802-1x.domain-match alongside ca-cert. Redundant with the hash pin
+ * itself (which already matches one exact cert) but kept consistent with
+ * tofu_update_ca_cert()'s behavior; cheap, harmless either way.
  */
 static void
-tofu_update_ca_cert_hash(const char *uuid, const char *hash_hex)
+tofu_update_ca_cert_hash(const char *uuid, const char *hash_hex, const char *domain)
 {
     gs_free char         *hash_uri = NULL;
     NMSettingsConnection *sconn;
@@ -633,6 +741,9 @@ tofu_update_ca_cert_hash(const char *uuid, const char *hash_hex)
         return;
     }
 
+    if (domain && *domain)
+        g_object_set(s_8021x, NM_SETTING_802_1X_DOMAIN_MATCH, domain, NULL);
+
     if (!nm_settings_connection_update(sconn,
                                        NULL,
                                        clone,
@@ -647,7 +758,11 @@ tofu_update_ca_cert_hash(const char *uuid, const char *hash_hex)
                uuid,
                upd_err->message);
     } else {
-        _NMLOG(LOGL_INFO, "update-ca-cert-hash: set ca-cert=%s for uuid=%s", hash_uri, uuid);
+        _NMLOG(LOGL_INFO,
+               "update-ca-cert-hash: set ca-cert=%s domain-match=%s for uuid=%s",
+               hash_uri,
+               (domain && *domain) ? domain : "(none)",
+               uuid);
     }
     g_object_unref(clone);
 }
@@ -680,10 +795,11 @@ tofu_on_agent_response(gboolean accepted, const char *ssid, gpointer user_data)
     }
 
     if (accepted) {
-        gboolean         has_ca_chain = FALSE;
-        NMTOFUCertInfo  *leaf         = NULL;
-        gs_free char    *snap_uuid    = g_strdup(s_uuid);
-        guint            i;
+        NMTOFUCertInfo         *leaf      = NULL;
+        gs_free char           *snap_uuid = g_strdup(s_uuid);
+        gs_unref_ptrarray GPtrArray *san_names = NULL;
+        const char              *domain    = NULL;
+        guint                    i;
 
         if (s_observed_certs) {
             for (i = 0; i < s_observed_certs->certs->len; i++) {
@@ -691,25 +807,31 @@ tofu_on_agent_response(gboolean accepted, const char *ssid, gpointer user_data)
 
                 if (info->depth == 0)
                     leaf = info;
-                else
-                    has_ca_chain = TRUE;
             }
         }
 
-        if (!has_ca_chain && leaf) {
-            /* Only leaf cert observed — pin it on the connection profile via
-             * ca-cert=hash://server/sha256/<hex>, then reconnect. */
-            tofu_update_ca_cert_hash(snap_uuid, leaf->hash);
-            nm_tofu_reset_session();
-            tofu_set_autoconnect_for_uuid(snap_uuid, TRUE);
-            tofu_authenticate_connection_by_uuid(snap_uuid);
-        } else {
-            /* CA chain present — update connection profile with root CA, then reconnect. */
-            tofu_update_ca_cert(snap_uuid);
+        if (leaf && leaf->cert_data) {
+            san_names = extract_san_dnsnames(leaf->cert_data);
+            if (san_names->len > 0)
+                domain = g_ptr_array_index(san_names, 0);
+        }
+
+        if (tofu_update_ca_cert(snap_uuid, domain)) {
+            /* AP sent its self-signed root — pinned as ca-cert, then reconnect. */
             nm_tofu_reset_session();
             tofu_set_autoconnect_for_uuid(snap_uuid, TRUE);
             tofu_add_timestamp_to_connection(snap_uuid);
             tofu_authenticate_connection_by_uuid(snap_uuid);
+        } else if (leaf) {
+            /* No root observed — pin the leaf hash instead via
+             * ca-cert=hash://server/sha256/<hex>, then reconnect. */
+            tofu_update_ca_cert_hash(snap_uuid, leaf->hash, domain);
+            nm_tofu_reset_session();
+            tofu_set_autoconnect_for_uuid(snap_uuid, TRUE);
+            tofu_authenticate_connection_by_uuid(snap_uuid);
+        } else {
+            _NMLOG(LOGL_WARN, "agent response: no usable cert to pin for uuid=%s", snap_uuid);
+            nm_tofu_reset_session();
         }
     } else {
         gs_free char *snap_uuid = g_strdup(s_uuid);
@@ -730,8 +852,8 @@ tofu_on_agent_response(gboolean accepted, const char *ssid, gpointer user_data)
 static void
 tofu_parse_and_dispatch(const char *disclaimer)
 {
-    NMTOFUCertInfo    *show_cert = NULL;
-    NMTOFUCertInfo    *leaf_cert = NULL;
+    NMTOFUCertInfo    *leaf_cert        = NULL;
+    GBytes            *display_cert_data = NULL;
     gnutls_x509_crt_t  crt;
     gnutls_datum_t     datum;
     char               cn[256]        = {0};
@@ -760,9 +882,11 @@ tofu_parse_and_dispatch(const char *disclaimer)
            s_observed_certs->certs->len,
            s_ssid);
 
-    /* Index 0 = top of chain (shown to user); find depth==0 for SAN. */
-    show_cert = g_ptr_array_index(s_observed_certs->certs, 0);
-
+    /* The server's own leaf cert (depth==0) is what the user needs to
+     * verify — not array index 0. wpa_supplicant's Certification signal
+     * fires highest-depth-first (root/intermediate before leaf), so index 0
+     * is the CA's own cert, not the server's; showing it here would ask the
+     * user to verify the wrong entity's identity. */
     for (i = 0; i < s_observed_certs->certs->len; i++) {
         NMTOFUCertInfo *info = g_ptr_array_index(s_observed_certs->certs, i);
 
@@ -771,14 +895,20 @@ tofu_parse_and_dispatch(const char *disclaimer)
             break;
         }
     }
+    /* Show whatever's actually being pinned: the resolved self-signed root
+     * (set in tofu_stage3()) if one was found, since that's what the user
+     * is really trusting going forward — otherwise the leaf itself, since
+     * that's what gets hash-pinned instead. Domain/url below always come
+     * from the leaf regardless, since that's the real server's identity. */
+    display_cert_data = s_resolved_root ?: (leaf_cert ? leaf_cert->cert_data : NULL);
 
-    if (!show_cert || !show_cert->cert_data) {
+    if (!display_cert_data) {
         _NMLOG(LOGL_WARN, "invalid cert data for dispatch");
         return;
     }
 
-    datum.data = (unsigned char *) g_bytes_get_data(show_cert->cert_data, NULL);
-    datum.size = g_bytes_get_size(show_cert->cert_data);
+    datum.data = (unsigned char *) g_bytes_get_data(display_cert_data, NULL);
+    datum.size = g_bytes_get_size(display_cert_data);
 
     if (gnutls_x509_crt_init(&crt) < 0
         || gnutls_x509_crt_import(crt, &datum, GNUTLS_X509_FMT_DER) < 0) {
@@ -861,12 +991,26 @@ tofu_parse_and_dispatch(const char *disclaimer)
 static void
 tofu_stage3(void)
 {
+    gboolean via_system_trust = FALSE;
+
     /* Disconnect while user reviews; prevent reconnect loop. */
     tofu_deauthenticate_connection_by_uuid(s_uuid);
     tofu_set_autoconnect_for_uuid(s_uuid, FALSE);
 
-    tofu_parse_and_dispatch(
-        _("Review the server certificate details below before trusting this network."));
+    /* Resolved once here — reused by both the display below and the actual
+     * pin on accept (tofu_update_ca_cert()), so they can never disagree. */
+    nm_clear_pointer(&s_resolved_root, g_bytes_unref);
+    s_resolved_root = tofu_resolve_self_signed_root(s_observed_certs, &via_system_trust);
+
+    if (via_system_trust) {
+        tofu_parse_and_dispatch(
+            _("Review the server certificate details below before trusting this network. "
+              "Its issuing CA is also recognized by your system's trusted certificate store, "
+              "which supports (but does not guarantee) that it is legitimate."));
+    } else {
+        tofu_parse_and_dispatch(
+            _("Review the server certificate details below before trusting this network."));
+    }
 }
 
 /*****************************************************************************/
