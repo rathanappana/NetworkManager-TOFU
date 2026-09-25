@@ -10,6 +10,35 @@
 
 set -e
 
+# Color for readability in the printed cert/config summary below — no emoji.
+if [ -t 1 ]; then
+    C_CYAN=$'\033[0;36m'
+    C_YELLOW=$'\033[0;33m'
+    C_GREEN=$'\033[0;32m'
+    C_RESET=$'\033[0m'
+else
+    C_CYAN=""; C_YELLOW=""; C_GREEN=""; C_RESET=""
+fi
+
+# Prints a cert's bare lowercase-hex SHA-256 fingerprint — the same form
+# wpa_supplicant itself logs in CTRL-EVENT-EAP-PEER-CERT hash=... lines, for
+# direct comparison — plus any SAN/DNS names.
+print_cert_info() {
+    local label="$1" path="$2"
+    local fp_bare sans
+
+    fp_bare=$(openssl x509 -in "$path" -noout -fingerprint -sha256 2>/dev/null \
+              | sed 's/^.*=//' | tr -d ':' | tr 'A-F' 'a-f')
+    sans=$(openssl x509 -in "$path" -noout -ext subjectAltName 2>/dev/null \
+           | tail -n +2 | sed 's/^ *//')
+
+    echo "  -> ${C_CYAN}${label}${C_RESET}: $path"
+    echo "       sha256 : ${C_YELLOW}${fp_bare}${C_RESET}"
+    if [ -n "$sans" ]; then
+        echo "       SAN/DNS: ${C_GREEN}${sans}${C_RESET}"
+    fi
+}
+
 CERT_DIR="/tmp/tofu-sim"
 FR_DIR="$CERT_DIR/frcerts"
 CON_NAME="TOFU-Sim-Net"
@@ -81,6 +110,21 @@ build_chain="n"
 read -rp "Build a 3-tier chain (root+intermediate+leaf), or is the plain bootstrap (root+leaf) enough? [chain/simple, default simple] " ans
 [[ "$ans" =~ ^[Cc] ]] && build_chain="y"
 
+# Independent of build_chain (which only controls how many tiers get
+# generated): what hostapd actually sends in server_cert. RFC 5246/8446 say
+# the self-signed root SHOULD NOT be sent (client must already trust it
+# locally, so it's redundant) — but plenty of real APs send it anyway
+# (untrimmed chain bundles from CA tooling), so all three shapes are worth
+# testing: leaf only, leaf+intermediate (no root, "correct" per RFC), or
+# leaf+intermediate+root (common in practice despite the RFC guidance).
+chain_send_mode="full"
+read -rp "hostapd sends: [l]eaf only / [c]hain = leaf+intermediate, no root / [f]ull = leaf+intermediate+root (default) ? " ans
+case "$ans" in
+    [Ll]*) chain_send_mode="leaf" ;;
+    [Cc]*) chain_send_mode="chain" ;;
+    *) chain_send_mode="full" ;;
+esac
+
 # Cleanup trap: stop hostapd and virtual hardware, but keep the persistent
 # cert directory and the connection profile so results can be inspected
 # (and the pinned-cert re-TOFU path can be tested by rerunning) after exit.
@@ -141,6 +185,23 @@ if [ "$recreate_certs" = "y" ]; then
     # Drop any certs/state the template dir may already carry so bootstrap
     # regenerates everything fresh (it skips steps whose output file exists).
     rm -f "$FR_DIR"/{ca.pem,ca.key,ca.der,server.pem,server.key,server.crt,server.csr,server.p12,client.pem,client.key,client.crt,client.csr,client.p12,dh,random,serial,index.txt}*
+    # server.cnf ships req_extensions=v3_req commented out, so its own
+    # [alt_names] DNS.1 SAN never gets applied to server.crt. Pointing
+    # req_extensions at v3_req directly fails at CSR-generation time:
+    # v3_req also carries authorityKeyIdentifier=keyid:always,issuer:always,
+    # which needs a signing CA that doesn't exist yet at that step ("no
+    # issuer certificate"). Add a SAN-only section instead and point
+    # req_extensions there — server2.crt (the 3-tier leaf) already gets a
+    # SAN explicitly below; this gets one onto the 2-tier/simple leaf too.
+    # Real RADIUS/AP certs commonly set CN to the same FQDN as the SAN
+    # (they agree) — matches that convention instead of the template's
+    # generic placeholder CN.
+    sed -i \
+        -e 's/^#req_extensions\(\s*=\s*\)v3_req/req_extensions\1san_req/' \
+        -e 's/^DNS\.1 = .*/DNS.1 = radius.tofu-sim.example/' \
+        -e 's/^commonName\(\s*=\s*\)".*"/commonName\1"radius.tofu-sim.example"/' \
+        "$FR_DIR/server.cnf"
+    printf '\n[ san_req ]\nsubjectAltName = @alt_names\n' >> "$FR_DIR/server.cnf"
     (cd "$FR_DIR" && ./bootstrap > "$CERT_DIR/bootstrap.log" 2>&1) \
         || { echo "Error: bootstrap failed, see $CERT_DIR/bootstrap.log"; exit 1; }
 else
@@ -173,40 +234,59 @@ if [ "$build_chain" = "y" ] && { [ "$recreate_certs" = "y" ] || [ ! -f "$FR_DIR/
         # eduroam/campusroam chain (leaf issued by an intermediate, not the root).
         openssl genrsa -out server2.key 2048 2>/dev/null
         openssl req -new -key server2.key -out server2.csr \
-            -subj "/C=BE/O=WiSec26/CN=TOFU-Simulated-Server" 2>/dev/null
+            -subj "/C=BE/O=WiSec26/CN=radius.tofu-sim.example" 2>/dev/null
         openssl x509 -req -in server2.csr -CA intermediate.pem -CAkey intermediate.key -CAcreateserial \
             -out server2.crt -days 365 \
-            -extfile <(printf "basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n") \
+            -extfile <(printf "basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:radius.tofu-sim.example\n") \
             2>/dev/null
     )
 fi
 
 if [ "$build_chain" = "y" ]; then
-    # hostapd sends leaf+intermediate only — the correct real-world server
-    # config (the root is never sent over the wire, only used locally as a
-    # trust anchor).
-    cat "$FR_DIR/server2.crt" "$FR_DIR/intermediate.pem" > "$CERT_DIR/server-chain.pem"
     SERVER_CRT="$FR_DIR/server2.crt"
     HOSTAPD_KEY="$FR_DIR/server2.key"
     HOSTAPD_KEY_PASSWD=""
 
+    # chain = leaf+intermediate, no root — the correct real-world server
+    # config per RFC 5246/8446 (root SHOULD NOT be sent, client must already
+    # trust it locally). full = same plus the root anyway, since plenty of
+    # real APs send it too (untrimmed chain bundles).
+    cat "$FR_DIR/server2.crt" "$FR_DIR/intermediate.pem" > "$CERT_DIR/server-chain.pem"
+    cat "$FR_DIR/server2.crt" "$FR_DIR/intermediate.pem" "$FR_DIR/ca.pem" \
+        > "$CERT_DIR/server-chain-full.pem"
+
     cat "$FR_DIR/intermediate.pem" "$FR_DIR/ca.pem" > "$CERT_DIR/full_chain.pem"
     echo "  -> Full chain (intermediate+root) for 802-1x.ca-cert : $CERT_DIR/full_chain.pem"
     echo "  -> Root only for 802-1x.ca-cert                      : $FR_DIR/ca.pem"
+
+    case "$chain_send_mode" in
+        leaf) HOSTAPD_SERVER_CERT="$SERVER_CRT" ;;
+        full) HOSTAPD_SERVER_CERT="$CERT_DIR/server-chain-full.pem" ;;
+        *)    HOSTAPD_SERVER_CERT="$CERT_DIR/server-chain.pem" ;;
+    esac
 else
-    # hostapd sends this whole chain during the TLS handshake, so wpa_supplicant's
-    # Certification signal reports depth=0 (server leaf) then depth=1 (root CA) —
-    # exercises the CA-chain pinning path, not just leaf-hash pinning.
-    cat "$FR_DIR/server.crt" "$FR_DIR/ca.pem" > "$CERT_DIR/server-chain.pem"
     SERVER_CRT="$FR_DIR/server.crt"
     HOSTAPD_KEY="$FR_DIR/server.key"
     HOSTAPD_KEY_PASSWD="whatever"
-fi
 
-echo "  -> Server cert fingerprint:"
-openssl x509 -in "$SERVER_CRT" -noout -fingerprint -sha256 | sed 's/^/     /'
-echo "  -> Root CA fingerprint:"
-openssl x509 -in "$FR_DIR/ca.pem" -noout -fingerprint -sha256 | sed 's/^/     /'
+    # 2-tier: leaf is signed directly by root, there is no intermediate to
+    # send — "chain" collapses to "leaf" here; "full" adds the root anyway,
+    # so wpa_supplicant's Certification signal reports depth=0 then depth=1
+    # (root CA), exercising the CA-chain pinning path.
+    cat "$FR_DIR/server.crt" "$FR_DIR/ca.pem" > "$CERT_DIR/server-chain-full.pem"
+
+    case "$chain_send_mode" in
+        full) HOSTAPD_SERVER_CERT="$CERT_DIR/server-chain-full.pem" ;;
+        *)    HOSTAPD_SERVER_CERT="$SERVER_CRT" ;;
+    esac
+fi
+echo "  -> hostapd server_cert (mode=$chain_send_mode): $HOSTAPD_SERVER_CERT"
+
+print_cert_info "Server (leaf) cert" "$SERVER_CRT"
+if [ "$build_chain" = "y" ]; then
+    print_cert_info "Intermediate CA cert" "$FR_DIR/intermediate.pem"
+fi
+print_cert_info "Root CA cert" "$FR_DIR/ca.pem"
 
 # 5. Configure and start hostapd (virtual Access Point, PEAP-MSCHAPv2)
 echo "[3/5] Starting hostapd EAP server on $AP_IFACE..."
@@ -223,7 +303,7 @@ rsn_pairwise=CCMP
 ieee8021x=1
 eap_server=1
 eap_user_file=$CERT_DIR/hostapd.eap_user
-server_cert=$CERT_DIR/server-chain.pem
+server_cert=$HOSTAPD_SERVER_CERT
 private_key=$HOSTAPD_KEY
 logger_syslog=-1
 logger_syslog_level=0
