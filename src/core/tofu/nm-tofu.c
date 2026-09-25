@@ -294,15 +294,55 @@ tofu_resolve_self_signed_root(NMTOFUCertSession *observed_session, gboolean *out
                    (int) self_signed,
                    subj_buf,
                    issr_buf);
+
+            if (self_signed) {
+                /* AP already sent a self-signed root directly — nothing to
+                 * complete. Still check the system trust store, purely for
+                 * the disclaimer's confidence wording: does the OS also
+                 * recognize this exact cert (byte match, not just name —
+                 * HARICA publishes two different certs under the identical
+                 * subject name). Reuses the same trust-list pattern as the
+                 * walk-up below, just to confirm rather than to complete. */
+                if (out_via_system_trust) {
+                    gnutls_x509_trust_list_t sys_trust = NULL;
+
+                    gnutls_x509_trust_list_init(&sys_trust, 0);
+                    if (gnutls_x509_trust_list_add_system_trust(sys_trust, 0, 0) > 0) {
+                        gnutls_x509_crt_t match = NULL;
+
+                        if (gnutls_x509_trust_list_get_issuer(sys_trust,
+                                                              crt,
+                                                              &match,
+                                                              GNUTLS_TL_GET_COPY)
+                                == GNUTLS_E_SUCCESS
+                            && match) {
+                            gnutls_datum_t match_der = {};
+
+                            if (gnutls_x509_crt_export2(match, GNUTLS_X509_FMT_DER, &match_der)
+                                == GNUTLS_E_SUCCESS) {
+                                *out_via_system_trust =
+                                    match_der.size == datum.size
+                                    && memcmp(match_der.data, datum.data, datum.size) == 0;
+                                gnutls_free(match_der.data);
+                            }
+                            gnutls_x509_crt_deinit(match);
+                        }
+                    }
+                    gnutls_x509_trust_list_deinit(sys_trust, 0);
+                }
+
+                _NMLOG(LOGL_DEBUG,
+                       "resolve-root: AP sent its own self-signed root at depth=%u (also in "
+                       "system trust store: %d)",
+                       info->depth,
+                       out_via_system_trust ? (int) *out_via_system_trust : -1);
+                gnutls_x509_crt_deinit(crt);
+                return g_bytes_ref(info->cert_data);
+            }
         } else {
             _NMLOG(LOGL_DEBUG, "resolve-root: candidate depth=%u DER import failed", info->depth);
         }
         gnutls_x509_crt_deinit(crt);
-
-        if (self_signed) {
-            _NMLOG(LOGL_DEBUG, "resolve-root: AP sent its own self-signed root at depth=%u", info->depth);
-            return g_bytes_ref(info->cert_data);
-        }
 
         if (!top || info->depth > top->depth)
             top = info;
