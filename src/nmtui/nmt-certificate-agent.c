@@ -202,19 +202,26 @@ nmt_certificate_agent_register(void)
         return FALSE;
     }
 
+    /* Registers via the same AgentManager.RegisterWithCapabilities every
+     * other secret agent uses — NM_SECRET_AGENT_CAPABILITY_WIFI_TOFU is
+     * what lets nm_agent_manager_find_secret_agent() (src/core/settings/
+     * nm-agent-manager.c) find this process later, filtered by that
+     * capability plus the real ACL/UID checks GetSecrets already applies. */
     reply = g_dbus_connection_call_sync(s_conn,
                                         "org.freedesktop.NetworkManager",
-                                        "/org/freedesktop/NetworkManager",
-                                        "org.freedesktop.NetworkManager",
-                                        "RegisterCertificateAgent",
-                                        g_variant_new("(o)", CERT_AGENT_OBJECT_PATH),
+                                        "/org/freedesktop/NetworkManager/AgentManager",
+                                        "org.freedesktop.NetworkManager.AgentManager",
+                                        "RegisterWithCapabilities",
+                                        g_variant_new("(su)",
+                                                      "nmtui-tofu",
+                                                      (guint32) NM_SECRET_AGENT_CAPABILITY_WIFI_TOFU),
                                         NULL,
                                         G_DBUS_CALL_FLAGS_NONE,
                                         5000,
                                         NULL,
                                         &error);
     if (!reply) {
-        g_warning("CertificateAgent: RegisterCertificateAgent failed: %s", error->message);
+        g_warning("CertificateAgent: RegisterWithCapabilities failed: %s", error->message);
         g_dbus_connection_unregister_object(s_conn, s_reg_id);
         s_reg_id = 0;
         g_clear_object(&s_conn);
@@ -232,9 +239,9 @@ nmt_certificate_agent_unregister(void)
 
     g_dbus_connection_call_sync(s_conn,
                                 "org.freedesktop.NetworkManager",
-                                "/org/freedesktop/NetworkManager",
-                                "org.freedesktop.NetworkManager",
-                                "UnregisterCertificateAgent",
+                                "/org/freedesktop/NetworkManager/AgentManager",
+                                "org.freedesktop.NetworkManager.AgentManager",
+                                "Unregister",
                                 NULL,
                                 NULL,
                                 G_DBUS_CALL_FLAGS_NONE,

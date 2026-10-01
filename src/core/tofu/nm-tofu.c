@@ -31,11 +31,20 @@
 #include "nm-act-request.h"
 #include "nm-active-connection.h"
 #include "nm-auth-utils.h"
-#include "nm-certificate-agent.h"
 #include "nm-dbus-manager.h"
 #include "nm-manager.h"
+#include "settings/nm-agent-manager.h"
+#include "settings/nm-secret-agent.h"
 #include "settings/nm-settings-connection.h"
 #include "settings/nm-settings.h"
+
+/* The agent side of this interface (nmt-certificate-agent.c and
+ * equivalents) is registered via AgentManager.RegisterWithCapabilities +
+ * NM_SECRET_AGENT_CAPABILITY_WIFI_TOFU, so nm_agent_manager_find_secret_agent()
+ * can find it — no separate registration entry point needed. */
+#define CERT_AGENT_OBJECT_PATH "/org/freedesktop/NetworkManager/CertificateAgent"
+#define CERT_AGENT_IFACE       "org.freedesktop.NetworkManager.CertificateAgent"
+#define NM_CERT_AGENT_TIMEOUT_MS 180000
 
 /*****************************************************************************/
 
@@ -51,6 +60,11 @@
 static NMTOFUSessionType  s_session_type   = NM_TOFU_SESSION_TYPE_DEFAULT;
 static char              *s_ssid           = NULL;
 static char              *s_uuid           = NULL;
+static NMAuthSubject     *s_subject        = NULL; /* who initiated the
+                                                     * connection attempt —
+                                                     * only their agent gets
+                                                     * asked, see
+                                                     * tofu_certificate_agent_call_request() */
 static NMTOFUCertSession *s_observed_certs = NULL; /* certs from wpa_supplicant */
 static GBytes            *s_resolved_root  = NULL; /* raw DER of the resolved
                                                      * self-signed root — set once
@@ -95,13 +109,17 @@ cert_session_free(NMTOFUCertSession *s)
 /* Session management                                                          */
 
 void
-nm_tofu_set_session(NMTOFUSessionType type, const char *ssid, const char *uuid)
+nm_tofu_set_session(NMTOFUSessionType type,
+                    const char       *ssid,
+                    const char       *uuid,
+                    NMAuthSubject    *subject)
 {
     nm_tofu_reset_session();
 
     s_session_type = type;
     s_ssid         = g_strdup(ssid ?: "");
     s_uuid         = g_strdup(uuid ?: "");
+    s_subject      = subject ? g_object_ref(subject) : NULL;
 
     _NMLOG(LOGL_INFO, "session started: type=%d ssid=%s uuid=%s", (int) type, s_ssid, s_uuid);
 }
@@ -134,6 +152,7 @@ nm_tofu_reset_session(void)
     nm_clear_pointer(&s_resolved_root, g_bytes_unref);
     nm_clear_g_free(&s_ssid);
     nm_clear_g_free(&s_uuid);
+    g_clear_object(&s_subject);
     s_session_type = NM_TOFU_SESSION_TYPE_DEFAULT;
 
     _NMLOG(LOGL_DEBUG, "session reset");
@@ -231,6 +250,10 @@ extract_san_dnsnames(GBytes *cert_data)
 /* Forward declaration — defined in the connection management section below. */
 static void tofu_deauthenticate_connection_by_uuid(const char *uuid_target);
 static void tofu_set_autoconnect_for_uuid(const char *uuid_target, gboolean enable);
+
+/* Forward declaration — defined in the Stage 3 section below, called from
+ * the CertificateAgent dispatch section above it. */
+static void tofu_on_agent_response(gboolean response, const char *ssid, gpointer user_data);
 
 /*****************************************************************************/
 /* Connection management helpers (all static — only called within this file)   */
@@ -808,6 +831,104 @@ tofu_update_ca_cert_hash(const char *uuid, const char *hash_hex, const char *dom
 }
 
 /*****************************************************************************/
+/* CertificateAgent dispatch                                                   */
+
+/* Only the initiating user's agent is ever eligible — no fall-back to other
+ * users' agents on failure. This mirrors nm_agent_manager_find_secret_agent()'s
+ * ACL+UID match exactly, but skips GetSecrets' multi-agent retry list: that
+ * retry exists for requests with no specific initiator (autoconnect), where
+ * several users' agents can be ACL-eligible at once. A TOFU popup always has
+ * a specific initiator, so at most one agent is ever eligible. */
+static gboolean
+certificate_agent_pick(NMConnection *connection, char **out_unique)
+{
+    NMSecretAgent *agent;
+
+    agent = nm_agent_manager_find_secret_agent(nm_agent_manager_get(),
+                                               connection,
+                                               s_subject,
+                                               NM_SECRET_AGENT_CAPABILITY_WIFI_TOFU);
+    if (!agent)
+        return FALSE;
+
+    *out_unique = g_strdup(nm_secret_agent_get_dbus_owner(agent));
+    return TRUE;
+}
+
+typedef struct {
+    char *ssid;
+} CertCallCtx;
+
+static void
+cert_req_cb(GObject *src, GAsyncResult *res, gpointer user_data)
+{
+    CertCallCtx               *ctx      = user_data;
+    gs_unref_variant GVariant *reply    = NULL;
+    gs_free_error GError      *error    = NULL;
+    gboolean                   response = FALSE;
+
+    reply = g_dbus_connection_call_finish(G_DBUS_CONNECTION(src), res, &error);
+
+    if (!reply) {
+        _NMLOG(LOGL_WARN,
+               "agent call failed (SSID=%s): %s — treating as rejected",
+               ctx->ssid,
+               error->message);
+    } else {
+        g_variant_get(reply, "(b)", &response);
+        _NMLOG(LOGL_INFO,
+               "agent: user %s certificate (SSID=%s)",
+               response ? "ACCEPTED" : "REJECTED",
+               ctx->ssid);
+    }
+
+    tofu_on_agent_response(response, ctx->ssid, NULL);
+
+    g_free(ctx->ssid);
+    g_free(ctx);
+}
+
+static void
+tofu_certificate_agent_call_request(GDBusConnection *conn,
+                                    NMConnection     *connection,
+                                    const char       *ssid,
+                                    const char       *cn,
+                                    const char       *issuer,
+                                    const char       *org,
+                                    const char       *sha256,
+                                    const char       *exp,
+                                    const char       *disclaimer,
+                                    const char       *url)
+{
+    CertCallCtx  *ctx;
+    gs_free char *dest = NULL;
+
+    if (!certificate_agent_pick(connection, &dest)) {
+        _NMLOG(LOGL_WARN, "no eligible agent for SSID=%s", ssid);
+        tofu_on_agent_response(FALSE, ssid, NULL);
+        return;
+    }
+
+    _NMLOG(LOGL_INFO, "calling agent %s for SSID=%s", dest, ssid);
+
+    ctx       = g_new0(CertCallCtx, 1);
+    ctx->ssid = g_strdup(ssid);
+
+    g_dbus_connection_call(conn,
+                           dest,
+                           CERT_AGENT_OBJECT_PATH,
+                           CERT_AGENT_IFACE,
+                           "CertificateVerificationRequest",
+                           g_variant_new("(ssssssss)", ssid, cn, issuer, org, sha256, exp, disclaimer, url),
+                           G_VARIANT_TYPE("(b)"),
+                           G_DBUS_CALL_FLAGS_NONE,
+                           NM_CERT_AGENT_TIMEOUT_MS,
+                           NULL,
+                           cert_req_cb,
+                           ctx);
+}
+
+/*****************************************************************************/
 /* Stage 3: parse cert + dispatch to agent                                     */
 
 /*
@@ -815,11 +936,11 @@ tofu_update_ca_cert_hash(const char *uuid, const char *hash_hex, const char *dom
  * Snapshots SSID/UUID before resetting session so reconnect calls are safe.
  */
 static void
-tofu_on_agent_response(gboolean accepted, const char *ssid, gpointer user_data)
+tofu_on_agent_response(gboolean response, const char *ssid, gpointer user_data)
 {
     _NMLOG(LOGL_INFO,
            "agent response: %s for SSID=%s",
-           accepted ? "ACCEPTED" : "REJECTED",
+           response ? "ACCEPTED" : "REJECTED",
            ssid ?: "(null)");
 
     if (!ssid || !*ssid) {
@@ -834,7 +955,7 @@ tofu_on_agent_response(gboolean accepted, const char *ssid, gpointer user_data)
         return;
     }
 
-    if (accepted) {
+    if (response) {
         NMTOFUCertInfo         *leaf      = NULL;
         gs_free char           *snap_uuid = g_strdup(s_uuid);
         gs_unref_ptrarray GPtrArray *san_names = NULL;
@@ -910,12 +1031,21 @@ tofu_parse_and_dispatch(const char *disclaimer)
     const char        *best_url  = "N/A";
     NMDBusManager     *dbus_mgr;
     GDBusConnection   *dbus_conn;
+    NMSettingsConnection *sconn;
+    NMConnection      *connection;
     guint              i;
 
     if (!s_observed_certs || s_observed_certs->certs->len == 0) {
         _NMLOG(LOGL_WARN, "no certs to dispatch for SSID=%s", s_ssid);
         return;
     }
+
+    sconn = nm_settings_get_connection_by_uuid(nm_settings_get(), s_uuid);
+    if (!sconn) {
+        _NMLOG(LOGL_WARN, "no connection found for uuid=%s — cannot dispatch", s_uuid);
+        return;
+    }
+    connection = nm_settings_connection_get_connection(sconn);
 
     _NMLOG(LOGL_INFO,
            "dispatching %u cert(s) for SSID=%s",
@@ -1004,17 +1134,16 @@ tofu_parse_and_dispatch(const char *disclaimer)
     dbus_mgr  = nm_dbus_manager_get();
     dbus_conn = nm_dbus_manager_get_dbus_connection(dbus_mgr);
 
-    nm_certificate_agent_call_request(dbus_conn,
-                                       s_ssid,
-                                       cn,
-                                       issuer,
-                                       org,
-                                       sha256_hex,
-                                       exp_str,
-                                       disclaimer ?: "",
-                                       best_url,
-                                       tofu_on_agent_response,
-                                       NULL);
+    tofu_certificate_agent_call_request(dbus_conn,
+                                        connection,
+                                        s_ssid,
+                                        cn,
+                                        issuer,
+                                        org,
+                                        sha256_hex,
+                                        exp_str,
+                                        disclaimer ?: "",
+                                        best_url);
 
     nm_clear_pointer(&san_names, g_ptr_array_unref);
 }

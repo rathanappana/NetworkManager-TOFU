@@ -157,7 +157,6 @@ libNetworkManager = static_library(
     'supplicant/nm-supplicant-settings-verify.c',
     'vpn/nm-vpn-connection.c',
     'vpn/nm-vpn-manager.c',
-    'tofu/nm-certificate-agent.c',
     'tofu/nm-tofu.c',
     'nm-active-connection.c',
     'nm-act-request.c',

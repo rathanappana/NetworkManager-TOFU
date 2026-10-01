@@ -1543,6 +1543,56 @@ nm_agent_manager_all_agents_have_capability(NMAgentManager           *manager,
 
 /*****************************************************************************/
 
+/**
+ * nm_agent_manager_find_secret_agent:
+ * @connection: the connection the request is about, for the ACL check
+ * @subject: the subject that should own the returned agent, or %NULL to
+ *   skip the per-user match
+ * @capability: required capability bit
+ *
+ * Same ACL + per-user UID match request_add_agent() applies for
+ * REQUEST_TYPE_CON_GET (nm_auth_is_subject_in_acl() plus a UID compare
+ * against the request's subject), plus a capability filter like
+ * nm_agent_manager_all_agents_have_capability() above — but returns the
+ * matching agent itself instead of a yes/no, for callers that need to
+ * place a D-Bus call on it directly (e.g. TOFU's CertificateAgent
+ * dispatch, which isn't a GetSecrets request and so never goes through
+ * request_add_agent()).
+ */
+NMSecretAgent *
+nm_agent_manager_find_secret_agent(NMAgentManager           *self,
+                                   NMConnection              *connection,
+                                   NMAuthSubject             *subject,
+                                   NMSecretAgentCapabilities  capability)
+{
+    NMAgentManagerPrivate *priv;
+    NMSecretAgent          *agent;
+    gboolean                subject_is_unix_process =
+        subject && (nm_auth_subject_get_subject_type(subject) == NM_AUTH_SUBJECT_TYPE_UNIX_PROCESS);
+    gulong subject_uid =
+        subject_is_unix_process ? nm_auth_subject_get_unix_process_uid(subject) : 0u;
+
+    g_return_val_if_fail(NM_IS_AGENT_MANAGER(self), NULL);
+    g_return_val_if_fail(NM_IS_CONNECTION(connection), NULL);
+
+    priv = NM_AGENT_MANAGER_GET_PRIVATE(self);
+
+    c_list_for_each_entry (agent, &priv->agent_lst_head, agent_lst) {
+        if (!agent->fully_registered)
+            continue;
+        if ((nm_secret_agent_get_capabilities(agent) & capability) != capability)
+            continue;
+        if (!nm_auth_is_subject_in_acl(connection, nm_secret_agent_get_subject(agent), NULL))
+            continue;
+        if (subject_is_unix_process && nm_secret_agent_get_owner_uid(agent) != subject_uid)
+            continue;
+        return agent;
+    }
+    return NULL;
+}
+
+/*****************************************************************************/
+
 static void
 authority_changed_cb(NMAuthManager *auth_manager, NMAgentManager *self)
 {
