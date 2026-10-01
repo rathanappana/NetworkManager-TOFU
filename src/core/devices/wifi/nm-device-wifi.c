@@ -3708,7 +3708,10 @@ act_stage2_config(NMDevice *device, NMDeviceStateReason *out_failure_reason)
                 ssid_bytes = nm_setting_wireless_get_ssid(s_wireless);
                 ssid_str   = ssid_bytes ? _nm_utils_ssid_to_utf8(ssid_bytes) : NULL;
 
-                nm_tofu_set_session(NM_TOFU_SESSION_TYPE_TOFU, ssid_str, uuid);
+                nm_tofu_set_session(NM_TOFU_SESSION_TYPE_TOFU,
+                                    ssid_str,
+                                    uuid,
+                                    nm_active_connection_get_subject(NM_ACTIVE_CONNECTION(req)));
                 nm_supplicant_config_suppress_credentials_for_tofu(config);
 
                 /* Credentials are withheld until the user accepts the cert,

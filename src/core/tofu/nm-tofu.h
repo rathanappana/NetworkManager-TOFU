@@ -62,7 +62,8 @@ typedef struct {
 
 void              nm_tofu_set_session(NMTOFUSessionType type,
                                       const char       *ssid,
-                                      const char       *uuid);
+                                      const char       *uuid,
+                                      NMAuthSubject    *subject);
 NMTOFUSessionType nm_tofu_get_session_type(void);
 const char       *nm_tofu_get_ssid(void);
 const char       *nm_tofu_get_uuid(void);

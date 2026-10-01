@@ -931,6 +931,8 @@ typedef enum /*< flags >*/ {
  * @NM_SECRET_AGENT_CAPABILITY_NONE: the agent supports no special capabilities
  * @NM_SECRET_AGENT_CAPABILITY_VPN_HINTS: the agent supports passing hints to
  * VPN plugin authentication dialogs.
+ * @NM_SECRET_AGENT_CAPABILITY_WIFI_TOFU: the agent supports Trust On First
+ * Use certificate verification dialogs for 802.1X Enterprise Wi-Fi.
  * @NM_SECRET_AGENT_CAPABILITY_LAST: bounds checking value; should not be used.
  *
  * #NMSecretAgentCapabilities indicate various capabilities of the agent.
@@ -938,9 +940,10 @@ typedef enum /*< flags >*/ {
 typedef enum /*< flags >*/ {
     NM_SECRET_AGENT_CAPABILITY_NONE      = 0x0,
     NM_SECRET_AGENT_CAPABILITY_VPN_HINTS = 0x1,
+    NM_SECRET_AGENT_CAPABILITY_WIFI_TOFU = 0x2,
 
     /* boundary value */
-    NM_SECRET_AGENT_CAPABILITY_LAST = NM_SECRET_AGENT_CAPABILITY_VPN_HINTS,
+    NM_SECRET_AGENT_CAPABILITY_LAST = NM_SECRET_AGENT_CAPABILITY_WIFI_TOFU,
 } NMSecretAgentCapabilities;
 
 #ifndef NM_VERSION_H

@@ -115,7 +115,9 @@ static NM_UTILS_FLAGS2STR_DEFINE(_capabilities_to_string,
                                  NMSecretAgentCapabilities,
                                  NM_UTILS_FLAGS2STR(NM_SECRET_AGENT_CAPABILITY_NONE, "none"),
                                  NM_UTILS_FLAGS2STR(NM_SECRET_AGENT_CAPABILITY_VPN_HINTS,
-                                                    "vpn-hints"), );
+                                                    "vpn-hints"),
+                                 NM_UTILS_FLAGS2STR(NM_SECRET_AGENT_CAPABILITY_WIFI_TOFU,
+                                                    "wifi-tofu"), );
 
 /*****************************************************************************/
 
