@@ -27,6 +27,7 @@
 #include <time.h>
 
 #include "devices/nm-device.h"
+#include "libnm-core-aux-intern/nm-common-macros.h"
 #include "libnm-core-intern/nm-core-internal.h"
 #include "nm-act-request.h"
 #include "nm-active-connection.h"
@@ -249,7 +250,9 @@ extract_san_dnsnames(GBytes *cert_data)
 
 /* Forward declaration — defined in the connection management section below. */
 static void tofu_deauthenticate_connection_by_uuid(const char *uuid_target);
-static void tofu_set_autoconnect_for_uuid(const char *uuid_target, gboolean enable);
+static void tofu_set_autoconnect_for_uuid(const char                      *uuid_target,
+                                          gboolean                         enable,
+                                          NMSettingsConnectionPersistMode  persist_mode);
 
 /* Forward declaration — defined in the Stage 3 section below, called from
  * the CertificateAgent dispatch section above it. */
@@ -511,7 +514,9 @@ tofu_deauthenticate_connection_by_uuid(const char *uuid_target)
 }
 
 static void
-tofu_set_autoconnect_for_uuid(const char *uuid_target, gboolean enable)
+tofu_set_autoconnect_for_uuid(const char                      *uuid_target,
+                               gboolean                         enable,
+                               NMSettingsConnectionPersistMode  persist_mode)
 {
     NMSettingsConnection *sconn;
     NMConnection         *clone;
@@ -544,7 +549,7 @@ tofu_set_autoconnect_for_uuid(const char *uuid_target, gboolean enable)
     if (!nm_settings_connection_update(sconn,
                                        NULL,
                                        clone,
-                                       NM_SETTINGS_CONNECTION_PERSIST_MODE_KEEP,
+                                       persist_mode,
                                        NM_SETTINGS_CONNECTION_INT_FLAGS_NONE,
                                        NM_SETTINGS_CONNECTION_INT_FLAGS_NONE,
                                        NM_SETTINGS_CONNECTION_UPDATE_REASON_UPDATE_NON_SECRET,
@@ -561,27 +566,35 @@ tofu_set_autoconnect_for_uuid(const char *uuid_target, gboolean enable)
     g_object_unref(clone);
 }
 
-static void
+/*
+ * Returns the new NMActiveConnection on success (borrowed reference, owned
+ * by NMManager — do not unref), or NULL on failure. The return value lets
+ * the not-authorized path in tofu_accept_persist() hook a one-shot
+ * state-changed handler to revert the temporary in-memory cert once this
+ * one activation settles, instead of leaving it mutated indefinitely.
+ */
+static NMActiveConnection *
 tofu_authenticate_connection_by_uuid(const char *uuid_target)
 {
     NMManager                     *manager;
     NMSettingsConnection          *sconn;
     NMConnection                  *conn;
     NMDevice                      *device = NULL;
+    NMActiveConnection            *active  = NULL;
     gs_free_error GError          *error   = NULL;
     gs_unref_object NMAuthSubject *subject = NULL;
 
     if (!uuid_target)
-        return;
+        return NULL;
 
     manager = nm_manager_get();
     if (!manager)
-        return;
+        return NULL;
 
     sconn = nm_settings_get_connection_by_uuid(nm_settings_get(), uuid_target);
     if (!sconn) {
         _NMLOG(LOGL_WARN, "no connection found for uuid=%s", uuid_target);
-        return;
+        return NULL;
     }
     conn = nm_settings_connection_get_connection(sconn);
 
@@ -611,23 +624,25 @@ tofu_authenticate_connection_by_uuid(const char *uuid_target)
     }
     if (!device) {
         _NMLOG(LOGL_WARN, "no WiFi device found for uuid=%s", uuid_target);
-        return;
+        return NULL;
     }
 
     subject = nm_auth_subject_new_internal();
     _NMLOG(LOGL_INFO, "activating uuid=%s on %s", uuid_target, nm_device_get_iface(device));
-    if (!nm_manager_activate_connection(manager,
-                                        sconn,
-                                        NULL,
-                                        NULL,
-                                        device,
-                                        subject,
-                                        NM_ACTIVATION_TYPE_MANAGED,
-                                        NM_ACTIVATION_REASON_USER_REQUEST,
-                                        NM_ACTIVATION_STATE_FLAG_NONE,
-                                        &error)) {
+    active = nm_manager_activate_connection(manager,
+                                            sconn,
+                                            NULL,
+                                            NULL,
+                                            device,
+                                            subject,
+                                            NM_ACTIVATION_TYPE_MANAGED,
+                                            NM_ACTIVATION_REASON_USER_REQUEST,
+                                            NM_ACTIVATION_STATE_FLAG_NONE,
+                                            &error);
+    if (!active)
         _NMLOG(LOGL_WARN, "activation failed for uuid=%s: %s", uuid_target, error->message);
-    }
+
+    return active;
 }
 
 static void
@@ -680,7 +695,10 @@ tofu_add_timestamp_to_connection(const char *uuid)
  * CA-hash/pin + domain match, see GitLab NetworkManager#1999).
  */
 static gboolean
-tofu_update_ca_cert(const char *uuid, const char *domain)
+tofu_update_ca_cert(const char                      *uuid,
+                    GBytes                          *root_der,
+                    const char                      *domain,
+                    NMSettingsConnectionPersistMode  persist_mode)
 {
     gs_free char         *pem_path = NULL;
     gs_free_error GError *error = NULL;
@@ -689,12 +707,12 @@ tofu_update_ca_cert(const char *uuid, const char *domain)
     NMSetting8021x       *s_8021x;
     gs_free_error GError *upd_err = NULL;
 
-    if (!s_resolved_root) {
+    if (!root_der) {
         _NMLOG(LOGL_INFO, "update-ca-cert: no self-signed root resolved for this session");
         return FALSE;
     }
 
-    pem_path = tofu_write_root_pem(s_resolved_root, &error);
+    pem_path = tofu_write_root_pem(root_der, &error);
     if (!pem_path) {
         _NMLOG(LOGL_WARN, "update-ca-cert: %s", error->message);
         return FALSE;
@@ -733,7 +751,7 @@ tofu_update_ca_cert(const char *uuid, const char *domain)
     if (!nm_settings_connection_update(sconn,
                                        NULL,
                                        clone,
-                                       NM_SETTINGS_CONNECTION_PERSIST_MODE_TO_DISK,
+                                       persist_mode,
                                        NM_SETTINGS_CONNECTION_INT_FLAGS_NONE,
                                        NM_SETTINGS_CONNECTION_INT_FLAGS_NONE,
                                        NM_SETTINGS_CONNECTION_UPDATE_REASON_UPDATE_NON_SECRET,
@@ -762,7 +780,10 @@ tofu_update_ca_cert(const char *uuid, const char *domain)
  * tofu_update_ca_cert()'s behavior; cheap, harmless either way.
  */
 static void
-tofu_update_ca_cert_hash(const char *uuid, const char *hash_hex, const char *domain)
+tofu_update_ca_cert_hash(const char                      *uuid,
+                         const char                      *hash_hex,
+                         const char                      *domain,
+                         NMSettingsConnectionPersistMode  persist_mode)
 {
     gs_free char         *hash_uri = NULL;
     NMSettingsConnection *sconn;
@@ -810,7 +831,7 @@ tofu_update_ca_cert_hash(const char *uuid, const char *hash_hex, const char *dom
     if (!nm_settings_connection_update(sconn,
                                        NULL,
                                        clone,
-                                       NM_SETTINGS_CONNECTION_PERSIST_MODE_TO_DISK,
+                                       persist_mode,
                                        NM_SETTINGS_CONNECTION_INT_FLAGS_NONE,
                                        NM_SETTINGS_CONNECTION_INT_FLAGS_NONE,
                                        NM_SETTINGS_CONNECTION_UPDATE_REASON_UPDATE_NON_SECRET,
@@ -932,6 +953,303 @@ tofu_certificate_agent_call_request(GDBusConnection *conn,
 /* Stage 3: parse cert + dispatch to agent                                     */
 
 /*
+ * Snapshot of everything the accept path needs, taken before the polkit
+ * round-trip — session state (s_uuid/s_resolved_root/s_subject/s_observed_certs)
+ * can be reset or replaced by a new session while the chain is pending.
+ */
+typedef struct {
+    char          *uuid;
+    char          *domain;
+    char          *leaf_hash; /* NULL if no leaf observed */
+    GBytes        *resolved_root; /* ref'd snapshot of s_resolved_root, or NULL */
+    NMAuthSubject *subject; /* ref'd snapshot of s_subject, or NULL */
+} TofuAcceptCtx;
+
+static void
+tofu_accept_ctx_free(TofuAcceptCtx *ctx)
+{
+    if (!ctx)
+        return;
+    g_free(ctx->uuid);
+    g_free(ctx->domain);
+    g_free(ctx->leaf_hash);
+    nm_clear_pointer(&ctx->resolved_root, g_bytes_unref);
+    g_clear_object(&ctx->subject);
+    g_free(ctx);
+}
+
+/*
+ * Persist (or not) and reconnect. @authorized decides both the persist
+ * mode AND which pin method is allowed:
+ *
+ * Authorized: TO_DISK, root CA pin preferred (tofu_update_ca_cert()),
+ * falling back to leaf hash — same as before this gate existed.
+ *
+ * Not authorized: leaf-hash pin ONLY, IN_MEMORY_DETACHED. Root pinning is
+ * deliberately skipped here even if one was resolved: tofu_update_ca_cert()
+ * always writes the root PEM to TOFU_CERT_DIR via tofu_write_root_pem()
+ * regardless of persist mode, so taking that path here would leave an
+ * orphaned file on disk referenced by nothing, surviving every future NM
+ * restart — confirmed by testing, a real leak, not hypothetical. The hash
+ * scheme (ca-cert=hash://server/sha256/<hex>) needs no file at all, so it
+ * has no equivalent leak — the only pin method safe to use when nothing
+ * is allowed to touch disk.
+ *
+ * This is the split the RFC thread settled on (Mathy, Beniamino +1'd):
+ * lack of modify.system/own permission doesn't block connecting, it just
+ * doesn't survive to the next attempt or become part of the shared
+ * profile.
+ *
+ * IN_MEMORY_DETACHED alone updates NM's live /run-backed copy of the
+ * stored connection, which every later activation also reads from —
+ * confirmed by testing to survive even a full `systemctl restart
+ * NetworkManager` (NM rescans /run on every startup), not just this one
+ * attempt. A fix via nm_manager_activate_connection()'s applied_connection
+ * override was tried and reverted: it breaks the EAP identity/password
+ * secrets fetch that runs during the same activation, because
+ * nm_settings_connection_has_unmodified_applied_connection() requires
+ * applied == stored before it'll hand back secrets, and the override
+ * deliberately makes them differ. Fix used instead: still mutate the
+ * stored connection in-memory (so applied == stored, secrets fetch still
+ * works), but revert it back to no-cert right after THIS activation
+ * settles (tofu_revert_temporary_cert(), hooked via a one-shot state
+ * watcher in tofu_accept_persist() below) instead of leaving it mutated
+ * indefinitely.
+ */
+static void
+tofu_revert_temporary_cert(const char *uuid)
+{
+    NMSettingsConnection          *sconn;
+    gs_unref_object NMConnection *clone = NULL;
+    NMSetting8021x                *s_8021x;
+    gs_free_error GError          *error = NULL;
+
+    sconn = nm_settings_get_connection_by_uuid(nm_settings_get(), uuid);
+    if (!sconn)
+        return;
+
+    clone   = nm_simple_connection_new_clone(nm_settings_connection_get_connection(sconn));
+    s_8021x = nm_connection_get_setting_802_1x(clone);
+    if (!s_8021x)
+        return;
+
+    nm_setting_802_1x_set_ca_cert(s_8021x, NULL, NM_SETTING_802_1X_CK_SCHEME_UNKNOWN, NULL, NULL);
+    g_object_set(s_8021x, NM_SETTING_802_1X_DOMAIN_MATCH, NULL, NULL);
+
+    if (!nm_settings_connection_update(sconn,
+                                       NULL,
+                                       clone,
+                                       NM_SETTINGS_CONNECTION_PERSIST_MODE_IN_MEMORY_DETACHED,
+                                       NM_SETTINGS_CONNECTION_INT_FLAGS_NONE,
+                                       NM_SETTINGS_CONNECTION_INT_FLAGS_NONE,
+                                       NM_SETTINGS_CONNECTION_UPDATE_REASON_UPDATE_NON_SECRET,
+                                       "tofu",
+                                       &error)) {
+        _NMLOG(LOGL_WARN, "revert-temporary-cert: failed for uuid=%s: %s", uuid, error->message);
+    } else {
+        _NMLOG(LOGL_INFO,
+               "revert-temporary-cert: cleared temporary pin for uuid=%s — "
+               "next attempt re-triggers TOFU",
+               uuid);
+    }
+
+    /* autoconnect=TRUE was also only ever meant for this one attempt in
+     * the not-authorized path (set via tofu_set_autoconnect_for_uuid()
+     * with IN_MEMORY_DETACHED in tofu_accept_persist()) — put it back to
+     * FALSE in-memory too, same lifecycle as the cert above. */
+    tofu_set_autoconnect_for_uuid(uuid, FALSE, NM_SETTINGS_CONNECTION_PERSIST_MODE_IN_MEMORY_DETACHED);
+}
+
+/*
+ * One-shot: fires on every state change of the activation the temporary
+ * pin was for, ignores transient ACTIVATING/DEACTIVATING states, and on
+ * the first settled state (ACTIVATED or DEACTIVATED) disconnects itself
+ * and reverts. @user_data is a heap-owned uuid string, freed here.
+ */
+static void
+tofu_temp_pin_state_changed_cb(NMActiveConnection *active, GParamSpec *pspec, gpointer user_data)
+{
+    char                   *uuid  = user_data;
+    NMActiveConnectionState state = nm_active_connection_get_state(active);
+
+    if (state != NM_ACTIVE_CONNECTION_STATE_ACTIVATED
+        && state != NM_ACTIVE_CONNECTION_STATE_DEACTIVATED)
+        return;
+
+    g_signal_handlers_disconnect_by_func(active, tofu_temp_pin_state_changed_cb, uuid);
+    tofu_revert_temporary_cert(uuid);
+    g_free(uuid);
+}
+
+static void
+tofu_accept_persist(TofuAcceptCtx *ctx, gboolean authorized)
+{
+    gboolean temp_pin_applied = FALSE;
+
+    if (authorized) {
+        if (tofu_update_ca_cert(ctx->uuid,
+                                ctx->resolved_root,
+                                ctx->domain,
+                                NM_SETTINGS_CONNECTION_PERSIST_MODE_TO_DISK)) {
+            _NMLOG(LOGL_INFO, "agent response: pinned root CA for uuid=%s (persisted)", ctx->uuid);
+        } else if (ctx->leaf_hash) {
+            tofu_update_ca_cert_hash(ctx->uuid,
+                                    ctx->leaf_hash,
+                                    ctx->domain,
+                                    NM_SETTINGS_CONNECTION_PERSIST_MODE_TO_DISK);
+            _NMLOG(LOGL_INFO,
+                   "agent response: pinned leaf hash for uuid=%s (persisted)",
+                   ctx->uuid);
+        } else {
+            _NMLOG(LOGL_WARN, "agent response: no usable cert to pin for uuid=%s", ctx->uuid);
+        }
+    } else if (ctx->leaf_hash) {
+        tofu_update_ca_cert_hash(ctx->uuid,
+                                 ctx->leaf_hash,
+                                 ctx->domain,
+                                 NM_SETTINGS_CONNECTION_PERSIST_MODE_IN_MEMORY_DETACHED);
+        _NMLOG(LOGL_INFO,
+               "agent response: pinned leaf hash for uuid=%s "
+               "(not persisted — modify permission denied)",
+               ctx->uuid);
+        temp_pin_applied = TRUE;
+    } else {
+        _NMLOG(LOGL_WARN,
+               "agent response: no leaf hash to pin for uuid=%s (modify permission denied)",
+               ctx->uuid);
+    }
+
+    /* Only reset the global session if it's still ours — a new one may
+     * have started while the polkit chain was pending. */
+    if (nm_streq0(s_uuid, ctx->uuid))
+        nm_tofu_reset_session();
+
+    tofu_set_autoconnect_for_uuid(ctx->uuid,
+                                  TRUE,
+                                  authorized ? NM_SETTINGS_CONNECTION_PERSIST_MODE_TO_DISK
+                                             : NM_SETTINGS_CONNECTION_PERSIST_MODE_IN_MEMORY_DETACHED);
+    tofu_add_timestamp_to_connection(ctx->uuid);
+
+    if (temp_pin_applied) {
+        NMActiveConnection *active = tofu_authenticate_connection_by_uuid(ctx->uuid);
+
+        if (active) {
+            g_signal_connect(active,
+                             "notify::" NM_ACTIVE_CONNECTION_STATE,
+                             G_CALLBACK(tofu_temp_pin_state_changed_cb),
+                             g_strdup(ctx->uuid));
+        } else {
+            /* Activation didn't even start (e.g. no WiFi device found) —
+             * nothing will ever fire the state-changed watcher, so revert
+             * immediately instead of leaving the temporary pin stuck. */
+            tofu_revert_temporary_cert(ctx->uuid);
+        }
+    } else {
+        tofu_authenticate_connection_by_uuid(ctx->uuid);
+    }
+
+    tofu_accept_ctx_free(ctx);
+}
+
+/*
+ * Shared polkit modify.own/modify.system check — same permission split
+ * real NM's own Settings.Connection.Update and .Delete D-Bus calls use
+ * (get_modify_permission_basic(), nm-settings-connection.c:1917-1931), so
+ * both the accept (pin+persist) and reject (delete) paths below reuse one
+ * mechanism instead of each building its own auth chain.
+ *
+ * Returns TRUE if an async check was started — @done_func fires later via
+ * tofu_polkit_check_cb(). Returns FALSE immediately, without ever calling
+ * @done_func, when there's no real human subject to check (e.g. NM's own
+ * autoconnect reconnecting on its own, subject type INTERNAL not
+ * UNIX_PROCESS) — caller decides the safe default itself in that case.
+ * allow_interaction=FALSE: never show an admin password popup, just read
+ * whatever's already authorized.
+ */
+typedef void (*TofuPolkitDoneFunc)(gboolean authorized, gpointer user_data);
+
+static void
+tofu_polkit_check_cb(NMAuthChain *chain, GDBusMethodInvocation *context, gpointer user_data)
+{
+    TofuPolkitDoneFunc done_func = nm_auth_chain_get_data(chain, "done_func");
+    const char         *perm     = nm_auth_chain_get_data(chain, "perm");
+    gboolean            authorized;
+
+    authorized = perm && nm_auth_chain_get_result(chain, perm) == NM_AUTH_CALL_RESULT_YES;
+
+    _NMLOG(LOGL_DEBUG, "polkit %s check -> %s", perm ?: "(none)", authorized ? "YES" : "NO");
+
+    done_func(authorized, nm_auth_chain_get_data(chain, "done_data"));
+}
+
+static gboolean
+tofu_polkit_check_modify(NMConnection       *connection,
+                         NMAuthSubject      *subject,
+                         TofuPolkitDoneFunc  done_func,
+                         gpointer            user_data)
+{
+    NMSettingConnection *s_con;
+    const char          *perm;
+    NMAuthChain          *chain;
+
+    if (!connection || !subject
+        || nm_auth_subject_get_subject_type(subject) != NM_AUTH_SUBJECT_TYPE_UNIX_PROCESS)
+        return FALSE;
+
+    s_con = nm_connection_get_setting_connection(connection);
+    perm  = (s_con && nm_setting_connection_get_num_permissions(s_con) == 1)
+              ? NM_AUTH_PERMISSION_SETTINGS_MODIFY_OWN
+              : NM_AUTH_PERMISSION_SETTINGS_MODIFY_SYSTEM;
+
+    chain = nm_auth_chain_new_subject(subject, NULL, tofu_polkit_check_cb, NULL);
+    nm_auth_chain_set_data(chain, "perm", (gpointer) perm, NULL);
+    nm_auth_chain_set_data(chain, "done_func", (gpointer) done_func, NULL);
+    nm_auth_chain_set_data(chain, "done_data", user_data, NULL);
+    nm_auth_chain_add_call_unsafe(chain, perm, FALSE); /* never show an admin popup */
+    return TRUE;
+}
+
+static void
+tofu_accept_polkit_done(gboolean authorized, gpointer user_data)
+{
+    tofu_accept_persist(user_data, authorized);
+}
+
+/*
+ * Rejection also deletes the profile — same real modify action real NM's
+ * own Settings.Connection.Delete D-Bus call requires modify.own/system
+ * for. Without this, any eligible-but-unauthorized user could delete a
+ * shared profile just by rejecting its cert.
+ */
+typedef struct {
+    char *uuid;
+    char *ssid;
+} TofuRejectCtx;
+
+static void
+tofu_reject_finish(TofuRejectCtx *rctx, gboolean authorized)
+{
+    if (authorized) {
+        tofu_remove_connection(rctx->uuid);
+        _NMLOG(LOGL_INFO, "user rejected cert; profile removed for SSID=%s", rctx->ssid);
+    } else {
+        _NMLOG(LOGL_INFO,
+               "user rejected cert for SSID=%s, but not authorized to delete this profile "
+               "— left in place",
+               rctx->ssid);
+    }
+    g_free(rctx->uuid);
+    g_free(rctx->ssid);
+    g_free(rctx);
+}
+
+static void
+tofu_reject_polkit_done(gboolean authorized, gpointer user_data)
+{
+    tofu_reject_finish(user_data, authorized);
+}
+
+/*
  * Called when the agent responds (accept/reject) or the call times out.
  * Snapshots SSID/UUID before resetting session so reconnect calls are safe.
  */
@@ -956,11 +1274,11 @@ tofu_on_agent_response(gboolean response, const char *ssid, gpointer user_data)
     }
 
     if (response) {
-        NMTOFUCertInfo         *leaf      = NULL;
-        gs_free char           *snap_uuid = g_strdup(s_uuid);
-        gs_unref_ptrarray GPtrArray *san_names = NULL;
-        const char              *domain    = NULL;
-        guint                    i;
+        NMTOFUCertInfo       *leaf = NULL;
+        TofuAcceptCtx        *ctx;
+        NMSettingsConnection *sconn;
+        NMConnection         *connection;
+        guint                 i;
 
         if (s_observed_certs) {
             for (i = 0; i < s_observed_certs->certs->len; i++) {
@@ -971,36 +1289,59 @@ tofu_on_agent_response(gboolean response, const char *ssid, gpointer user_data)
             }
         }
 
+        ctx                = g_new0(TofuAcceptCtx, 1);
+        ctx->uuid          = g_strdup(s_uuid);
+        ctx->resolved_root = s_resolved_root ? g_bytes_ref(s_resolved_root) : NULL;
+        ctx->leaf_hash     = leaf ? g_strdup(leaf->hash) : NULL;
+        ctx->subject       = s_subject ? g_object_ref(s_subject) : NULL;
+
         if (leaf && leaf->cert_data) {
-            san_names = extract_san_dnsnames(leaf->cert_data);
+            gs_unref_ptrarray GPtrArray *san_names = extract_san_dnsnames(leaf->cert_data);
+
             if (san_names->len > 0)
-                domain = g_ptr_array_index(san_names, 0);
+                ctx->domain = g_strdup(g_ptr_array_index(san_names, 0));
         }
 
-        if (tofu_update_ca_cert(snap_uuid, domain)) {
-            /* AP sent its self-signed root — pinned as ca-cert, then reconnect. */
+        if (!ctx->resolved_root && !ctx->leaf_hash) {
+            _NMLOG(LOGL_WARN, "agent response: no usable cert to pin for uuid=%s", ctx->uuid);
+            tofu_accept_ctx_free(ctx);
             nm_tofu_reset_session();
-            tofu_set_autoconnect_for_uuid(snap_uuid, TRUE);
-            tofu_add_timestamp_to_connection(snap_uuid);
-            tofu_authenticate_connection_by_uuid(snap_uuid);
-        } else if (leaf) {
-            /* No root observed — pin the leaf hash instead via
-             * ca-cert=hash://server/sha256/<hex>, then reconnect. */
-            tofu_update_ca_cert_hash(snap_uuid, leaf->hash, domain);
-            nm_tofu_reset_session();
-            tofu_set_autoconnect_for_uuid(snap_uuid, TRUE);
-            tofu_authenticate_connection_by_uuid(snap_uuid);
-        } else {
-            _NMLOG(LOGL_WARN, "agent response: no usable cert to pin for uuid=%s", snap_uuid);
-            nm_tofu_reset_session();
+            return;
         }
+
+        sconn      = nm_settings_get_connection_by_uuid(nm_settings_get(), ctx->uuid);
+        connection = sconn ? nm_settings_connection_get_connection(sconn) : NULL;
+
+        /* Polkit gate per the RFC thread's settled design: a per-user agent
+         * accepting a server identity for a system-wide profile is a
+         * privilege boundary. No real human subject to check (e.g. NM's own
+         * autoconnect reconnecting on its own) — default to the safe side,
+         * same reasoning as the reject path below: an unattended reconnect
+         * must never end up MORE trusted than an explicit, denied human
+         * request would be. */
+        if (!tofu_polkit_check_modify(connection, ctx->subject, tofu_accept_polkit_done, ctx))
+            tofu_accept_persist(ctx, FALSE);
     } else {
-        gs_free char *snap_uuid = g_strdup(s_uuid);
-        gs_free char *snap_ssid = g_strdup(s_ssid);
+        TofuRejectCtx                 *rctx       = g_new0(TofuRejectCtx, 1);
+        NMSettingsConnection          *sconn;
+        NMConnection                  *connection;
+        gs_unref_object NMAuthSubject *snap_subject = s_subject ? g_object_ref(s_subject) : NULL;
 
+        rctx->uuid = g_strdup(s_uuid);
+        rctx->ssid = g_strdup(s_ssid);
+
+        sconn      = nm_settings_get_connection_by_uuid(nm_settings_get(), rctx->uuid);
+        connection = sconn ? nm_settings_connection_get_connection(sconn) : NULL;
+
+        /* Reset now, independent of the polkit result below — the TOFU
+         * interaction itself is over either way; only whether we're
+         * allowed to delete the profile depends on authorization. uuid,
+         * ssid and subject above are already snapshotted, so clearing
+         * s_subject here is safe. */
         nm_tofu_reset_session();
-        tofu_remove_connection(snap_uuid);
-        _NMLOG(LOGL_INFO, "user rejected cert; profile removed for SSID=%s", snap_ssid);
+
+        if (!tofu_polkit_check_modify(connection, snap_subject, tofu_reject_polkit_done, rctx))
+            tofu_reject_finish(rctx, FALSE);
     }
 }
 
@@ -1164,7 +1505,7 @@ tofu_stage3(void)
 
     /* Disconnect while user reviews; prevent reconnect loop. */
     tofu_deauthenticate_connection_by_uuid(s_uuid);
-    tofu_set_autoconnect_for_uuid(s_uuid, FALSE);
+    tofu_set_autoconnect_for_uuid(s_uuid, FALSE, NM_SETTINGS_CONNECTION_PERSIST_MODE_KEEP);
 
     /* Resolved once here — reused by both the display below and the actual
      * pin on accept (tofu_update_ca_cert()), so they can never disagree. */
