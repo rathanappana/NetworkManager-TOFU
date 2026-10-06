@@ -1222,14 +1222,24 @@ tofu_accept_polkit_done(gboolean authorized, gpointer user_data)
  * shared profile just by rejecting its cert.
  */
 typedef struct {
-    char *uuid;
-    char *ssid;
+    char              *uuid;
+    char              *ssid;
+    NMTOFUSessionType  session_type; /* snapshot — reject never deletes
+                                      * during REVERIFY, regardless of
+                                      * @authorized below */
 } TofuRejectCtx;
 
 static void
 tofu_reject_finish(TofuRejectCtx *rctx, gboolean authorized)
 {
-    if (authorized) {
+    if (rctx->session_type == NM_TOFU_SESSION_TYPE_REVERIFY) {
+        /* Re-verify reject: user may be on an evil-twin AP right now —
+         * discard this attempt only, keep the existing pin untouched. */
+        tofu_deauthenticate_connection_by_uuid(rctx->uuid);
+        _NMLOG(LOGL_INFO,
+               "user rejected re-verify cert; disconnected, profile kept for SSID=%s",
+               rctx->ssid);
+    } else if (authorized) {
         tofu_remove_connection(rctx->uuid);
         _NMLOG(LOGL_INFO, "user rejected cert; profile removed for SSID=%s", rctx->ssid);
     } else {
@@ -1327,8 +1337,9 @@ tofu_on_agent_response(gboolean response, const char *ssid, gpointer user_data)
         NMConnection                  *connection;
         gs_unref_object NMAuthSubject *snap_subject = s_subject ? g_object_ref(s_subject) : NULL;
 
-        rctx->uuid = g_strdup(s_uuid);
-        rctx->ssid = g_strdup(s_ssid);
+        rctx->uuid         = g_strdup(s_uuid);
+        rctx->ssid         = g_strdup(s_ssid);
+        rctx->session_type = s_session_type;
 
         sconn      = nm_settings_get_connection_by_uuid(nm_settings_get(), rctx->uuid);
         connection = sconn ? nm_settings_connection_get_connection(sconn) : NULL;
@@ -1336,12 +1347,17 @@ tofu_on_agent_response(gboolean response, const char *ssid, gpointer user_data)
         /* Reset now, independent of the polkit result below — the TOFU
          * interaction itself is over either way; only whether we're
          * allowed to delete the profile depends on authorization. uuid,
-         * ssid and subject above are already snapshotted, so clearing
-         * s_subject here is safe. */
+         * ssid, session_type and subject above are already snapshotted, so
+         * clearing s_subject/s_session_type here is safe. */
         nm_tofu_reset_session();
 
-        if (!tofu_polkit_check_modify(connection, snap_subject, tofu_reject_polkit_done, rctx))
+        if (rctx->session_type == NM_TOFU_SESSION_TYPE_REVERIFY) {
+            /* No modify happens on this path (no delete, no persist) —
+             * nothing to gate behind polkit. */
             tofu_reject_finish(rctx, FALSE);
+        } else if (!tofu_polkit_check_modify(connection, snap_subject, tofu_reject_polkit_done, rctx)) {
+            tofu_reject_finish(rctx, FALSE);
+        }
     }
 }
 
@@ -1523,6 +1539,30 @@ tofu_stage3(void)
     }
 }
 
+/*
+ * nm_tofu_stage2_eap_failure: see nm-tofu.h. Reuses tofu_stage3() as-is —
+ * same deauth + resolve-root + agent dispatch as first-use, since the only
+ * difference (reject must not delete) lives in the reject path, not here.
+ */
+void
+nm_tofu_stage2_eap_failure(const char *status, const char *parameter)
+{
+    if (s_session_type != NM_TOFU_SESSION_TYPE_REVERIFY)
+        return;
+    if (!nm_streq0(status, "remote certificate verification"))
+        return;
+    if (nm_streq0(parameter, "success"))
+        return; /* same status fires on a passing handshake too */
+    if (!s_observed_certs || !s_observed_certs->finalized)
+        return;
+
+    _NMLOG(LOGL_INFO,
+           "reverify: wpa_supplicant rejected pinned cert for SSID=%s (%s) — re-prompting",
+           s_ssid,
+           parameter ?: "");
+    tofu_stage3();
+}
+
 /*****************************************************************************/
 /* Stage 2: cert collection from wpa_supplicant Certification signal           */
 
@@ -1622,6 +1662,12 @@ nm_tofu_stage2_cert_signal(GVariant *parameters)
     switch (s_session_type) {
     case NM_TOFU_SESSION_TYPE_TOFU:
         tofu_stage3();
+        break;
+
+    case NM_TOFU_SESSION_TYPE_REVERIFY:
+        /* Already pinned — just keep what was collected. Real dispatch (if
+         * any) happens from nm_tofu_stage2_eap_failure() instead, once
+         * wpa_supplicant's own verdict on this cert is known. */
         break;
 
     default:

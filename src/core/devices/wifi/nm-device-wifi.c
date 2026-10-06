@@ -3677,16 +3677,7 @@ act_stage2_config(NMDevice *device, NMDeviceStateReason *out_failure_reason)
 
         if (s_8021x
             && nm_setting_802_1x_get_ca_verify_mode(s_8021x)
-                   == NM_SETTING_802_1X_CA_VERIFY_MODE_TOFU
-            /* ca-verify-mode is a stable user-set policy toggle, not a
-             * one-shot trigger — it stays "tofu" even after a cert gets
-             * pinned. Gate entry on cert presence instead of resetting that
-             * setting behind the user's back: once a CA cert exists, step
-             * out of the way entirely and let the normal 802-1x path run
-             * (real credentials, wpa_supplicant validates against the
-             * pinned CA itself). This is a presence check, not the removed
-             * verify-and-deauth-on-mismatch logic — no re-validation here. */
-            && nm_setting_802_1x_get_ca_cert_scheme(s_8021x) == NM_SETTING_802_1X_CK_SCHEME_UNKNOWN) {
+                   == NM_SETTING_802_1X_CA_VERIFY_MODE_TOFU) {
             guint    n_eap   = nm_setting_802_1x_get_num_eap_methods(s_8021x);
             guint    i;
             gboolean has_eap = FALSE;
@@ -3708,20 +3699,40 @@ act_stage2_config(NMDevice *device, NMDeviceStateReason *out_failure_reason)
                 ssid_bytes = nm_setting_wireless_get_ssid(s_wireless);
                 ssid_str   = ssid_bytes ? _nm_utils_ssid_to_utf8(ssid_bytes) : NULL;
 
-                nm_tofu_set_session(NM_TOFU_SESSION_TYPE_TOFU,
-                                    ssid_str,
-                                    uuid,
-                                    nm_active_connection_get_subject(NM_ACTIVE_CONNECTION(req)));
-                nm_supplicant_config_suppress_credentials_for_tofu(config);
+                if (nm_setting_802_1x_get_ca_cert_scheme(s_8021x)
+                    == NM_SETTING_802_1X_CK_SCHEME_UNKNOWN) {
+                    nm_tofu_set_session(
+                        NM_TOFU_SESSION_TYPE_TOFU,
+                        ssid_str,
+                        uuid,
+                        nm_active_connection_get_subject(NM_ACTIVE_CONNECTION(req)));
+                    nm_supplicant_config_suppress_credentials_for_tofu(config);
 
-                /* Credentials are withheld until the user accepts the cert,
-                 * so EAP is expected to stall past the generic association
-                 * timeout while NM waits for wpa_supplicant's Certification
-                 * signal. tofu_stage3() deauthenticates as soon as the leaf
-                 * cert arrives, which cancels this timer anyway via the
-                 * normal deactivate path — skipping it here only matters if
-                 * the AP never sends anything at all for this attempt. */
-                skip_sup_timeout = TRUE;
+                    /* Credentials are withheld until the user accepts the
+                     * cert, so EAP is expected to stall past the generic
+                     * association timeout while NM waits for
+                     * wpa_supplicant's Certification signal. tofu_stage3()
+                     * deauthenticates as soon as the leaf cert arrives,
+                     * which cancels this timer anyway via the normal
+                     * deactivate path — skipping it here only matters if
+                     * the AP never sends anything at all for this
+                     * attempt. */
+                    skip_sup_timeout = TRUE;
+                } else {
+                    /* Already pinned by a previous TOFU accept: let
+                     * wpa_supplicant validate for real against that pin,
+                     * with real credentials — no suppression, no skipped
+                     * timeout, behaves like a normal connection unless
+                     * wpa_supplicant itself rejects the cert. NM just
+                     * watches: collects certs via the Certification signal
+                     * and re-prompts only on a cert-related EAP failure
+                     * (nm_tofu_stage2_eap_failure(), nm-tofu.c). */
+                    nm_tofu_set_session(
+                        NM_TOFU_SESSION_TYPE_REVERIFY,
+                        ssid_str,
+                        uuid,
+                        nm_active_connection_get_subject(NM_ACTIVE_CONNECTION(req)));
+                }
             }
         }
     }

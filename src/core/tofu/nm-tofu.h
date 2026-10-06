@@ -22,19 +22,22 @@
  *            ask the user to accept/reject, pin on accept. NM does not
  *            independently re-verify the chain — wpa_supplicant's own TLS
  *            stack is the sole authority on whether it's valid.
- *
- * This is the only session type wired up for now. A CONFIGURED_CA-style
- * independent re-verification path, and a USER_TRUSTED_NO_CA path that
- * silently re-enters TOFU on a changed pinned hash, existed previously but
- * were removed: both required NM to redo certificate chain validation
- * itself via GnuTLS, duplicating what wpa_supplicant already does
- * correctly. A replacement design for re-issuing the accept/reject prompt
- * when a previously-pinned identity changes belongs here later, built
- * around wpa_supplicant's own verdict instead.
+ * REVERIFY - ca-verify-mode == tofu, cert already pinned by a previous
+ *            TOFU accept. Real credentials used, wpa_supplicant validates
+ *            against the existing pin exactly as it would with any
+ *            configured CA. NM only watches: collects certs via the
+ *            Certification signal (nm_tofu_stage2_cert_signal(), silent,
+ *            no dispatch on leaf arrival unlike TOFU) and re-prompts only
+ *            if wpa_supplicant's own verification fails
+ *            (nm_tofu_stage2_eap_failure()) — reuses the same
+ *            accept/reject dispatch as TOFU, except a reject here never
+ *            deletes the profile: it just discards this attempt and
+ *            leaves the existing pin in place.
  */
 typedef enum {
-    NM_TOFU_SESSION_TYPE_DEFAULT = 0,
-    NM_TOFU_SESSION_TYPE_TOFU    = 1,
+    NM_TOFU_SESSION_TYPE_DEFAULT  = 0,
+    NM_TOFU_SESSION_TYPE_TOFU     = 1,
+    NM_TOFU_SESSION_TYPE_REVERIFY = 2,
 } NMTOFUSessionType;
 
 /*
@@ -73,5 +76,20 @@ void              nm_tofu_reset_session(void);
 /* Stage 2: cert collection from wpa_supplicant Certification signal          */
 
 void nm_tofu_stage2_cert_signal(GVariant *parameters);
+
+/*
+ * nm_tofu_stage2_eap_failure:
+ * @status: the wpa_supplicant EAP signal's status string, verbatim.
+ * @parameter: the EAP signal's parameter string, verbatim — "success" for
+ *             this status on a passing handshake, an error reason
+ *             otherwise ("Server certificate mismatch", "self-signed
+ *             certificate in certificate chain", ...).
+ *
+ * Only acts during a REVERIFY session, and only when status is
+ * "remote certificate verification" AND parameter is not "success" — any
+ * other EAP outcome (passing handshake, wrong password, timeout, etc.) is
+ * left alone, same as it would be without TOFU at all.
+ */
+void nm_tofu_stage2_eap_failure(const char *status, const char *parameter);
 
 #endif /* NM_TOFU_H */

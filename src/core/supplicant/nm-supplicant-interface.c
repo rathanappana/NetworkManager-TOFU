@@ -3315,6 +3315,11 @@ _signal_handle(NMSupplicantInterface *self,
         if (nm_streq(signal_name, "Certification")) {
             if (!g_variant_is_of_type(parameters, G_VARIANT_TYPE("(a{sv})")))
                 return;
+            /* TMP DEBUG: raw dict, every call, before any TOFU gate drops it */
+            {
+                gs_free char *_tmpdbg_str = g_variant_print(parameters, TRUE);
+                _NMLOG(LOGL_DEBUG, "TMPDBG Certification raw=%s", _tmpdbg_str);
+            }
             if (nm_tofu_get_session_type() == NM_TOFU_SESSION_TYPE_DEFAULT) {
                 _NMLOG(LOGL_DEBUG, "Certification signal ignored — no active TOFU session");
                 return;
@@ -3332,6 +3337,11 @@ _signal_handle(NMSupplicantInterface *self,
                 return;
 
             g_variant_get(parameters, "(&s&s)", &status, &parameter);
+
+            /* TMP DEBUG: raw status/parameter, every call, before branch dispatch */
+            _NMLOG(LOGL_DEBUG, "TMPDBG EAP status='%s' parameter='%s'", status, parameter);
+
+            nm_tofu_stage2_eap_failure(status, parameter);
 
             if (nm_streq(status, "started"))
                 auth_state = NM_SUPPLICANT_AUTH_STATE_STARTED;
