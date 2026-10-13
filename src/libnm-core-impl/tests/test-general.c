@@ -5764,6 +5764,77 @@ test_setting_802_1x_changed_signal(void)
     g_object_unref(connection);
 }
 
+#define SHA256_HEX_64 "b439227a143eae2dc34c71351bd0c0a4d358cb4ec9d38da05e0bd50dfe42ae80"
+
+static void
+_8021x_set_ca_cert_raw(NMSetting8021x *s_8021x, const char *uri)
+{
+    gs_unref_bytes GBytes *bytes = NULL;
+
+    bytes = uri ? g_bytes_new(uri, strlen(uri) + 1) : NULL;
+    /* g_object_set(), not nm_setting_802_1x_set_ca_cert(): the convenience
+     * setter does its own format checks, which would hide whether verify()
+     * independently rejects a malformed value stored directly (e.g. loaded
+     * from a keyfile or set over D-Bus). */
+    g_object_set(s_8021x, NM_SETTING_802_1X_CA_CERT, bytes, NULL);
+}
+
+static void
+test_setting_802_1x_server_hash_scheme(void)
+{
+    gs_unref_object NMSetting8021x *s_8021x = NULL;
+
+    s_8021x = (NMSetting8021x *) nm_setting_802_1x_new();
+    nm_setting_802_1x_add_eap_method(s_8021x, "ttls");
+    g_object_set(s_8021x, NM_SETTING_802_1X_IDENTITY, "bob", NULL);
+    g_object_set(s_8021x, NM_SETTING_802_1X_PHASE2_AUTH, "pap", NULL);
+
+    /* valid */
+    _8021x_set_ca_cert_raw(s_8021x, "hash://server/sha256/" SHA256_HEX_64);
+    nmtst_assert_setting_verifies(NM_SETTING(s_8021x));
+
+    /* wrong hash algorithm name */
+    _8021x_set_ca_cert_raw(s_8021x, "hash://server/sha1/" SHA256_HEX_64);
+    nmtst_assert_setting_verify_fails(NM_SETTING(s_8021x),
+                                      NM_CONNECTION_ERROR,
+                                      NM_CONNECTION_ERROR_INVALID_PROPERTY);
+
+    /* too short */
+    _8021x_set_ca_cert_raw(s_8021x,
+                           "hash://server/sha256/"
+                           "ab");
+    nmtst_assert_setting_verify_fails(NM_SETTING(s_8021x),
+                                      NM_CONNECTION_ERROR,
+                                      NM_CONNECTION_ERROR_INVALID_PROPERTY);
+
+    /* too long */
+    _8021x_set_ca_cert_raw(s_8021x, "hash://server/sha256/" SHA256_HEX_64 "ab");
+    nmtst_assert_setting_verify_fails(NM_SETTING(s_8021x),
+                                      NM_CONNECTION_ERROR,
+                                      NM_CONNECTION_ERROR_INVALID_PROPERTY);
+
+    /* non-hex characters */
+    _8021x_set_ca_cert_raw(s_8021x,
+                           "hash://server/sha256/"
+                           "zz" SHA256_HEX_64);
+    nmtst_assert_setting_verify_fails(NM_SETTING(s_8021x),
+                                      NM_CONNECTION_ERROR,
+                                      NM_CONNECTION_ERROR_INVALID_PROPERTY);
+
+    /* server-hash on client-cert: scheme only valid on a CA certificate */
+    _8021x_set_ca_cert_raw(s_8021x, "hash://server/sha256/" SHA256_HEX_64);
+    {
+        gs_unref_bytes GBytes *client_cert_bytes = NULL;
+        const char            *uri               = "hash://server/sha256/" SHA256_HEX_64;
+
+        client_cert_bytes = g_bytes_new(uri, strlen(uri) + 1);
+        g_object_set(s_8021x, NM_SETTING_802_1X_CLIENT_CERT, client_cert_bytes, NULL);
+    }
+    nmtst_assert_setting_verify_fails(NM_SETTING(s_8021x),
+                                      NM_CONNECTION_ERROR,
+                                      NM_CONNECTION_ERROR_INVALID_PROPERTY);
+}
+
 static void
 test_setting_old_uuid(void)
 {
@@ -12333,6 +12404,8 @@ main(int argc, char **argv)
                     test_setting_wireless_security_changed_signal);
     g_test_add_func("/core/general/test_setting_802_1x_changed_signal",
                     test_setting_802_1x_changed_signal);
+    g_test_add_func("/core/general/test_setting_802_1x_server_hash_scheme",
+                    test_setting_802_1x_server_hash_scheme);
     g_test_add_func("/core/general/test_setting_ip4_gateway", test_setting_ip4_gateway);
     g_test_add_func("/core/general/test_setting_ip6_gateway", test_setting_ip6_gateway);
     g_test_add_func("/core/general/test_setting_compare_default_strv",
