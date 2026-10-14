@@ -93,6 +93,7 @@ NM_GOBJECT_PROPERTIES_DEFINE(NMSetting8021x,
                              PROP_CA_CERT_PASSWORD,
                              PROP_CA_CERT_PASSWORD_FLAGS,
                              PROP_CA_PATH,
+                             PROP_SERVER_CERT_HASH,
                              PROP_SUBJECT_MATCH,
                              PROP_ALTSUBJECT_MATCHES,
                              PROP_DOMAIN_SUFFIX_MATCH,
@@ -142,6 +143,7 @@ typedef struct {
     GBytes *ca_cert;
     char   *ca_cert_password;
     char   *ca_path;
+    char   *server_cert_hash;
     char   *subject_match;
     GSList *altsubject_matches;
     char   *domain_suffix_match;
@@ -927,6 +929,28 @@ nm_setting_802_1x_get_ca_path(NMSetting8021x *setting)
     g_return_val_if_fail(NM_IS_SETTING_802_1X(setting), NULL);
 
     return NM_SETTING_802_1X_GET_PRIVATE(setting)->ca_path;
+}
+
+/**
+ * nm_setting_802_1x_get_server_cert_hash:
+ * @setting: the #NMSetting8021x
+ *
+ * Returns the server certificate hash used to pin the authentication
+ * server, bypassing the need for a CA certificate. The SHA-256
+ * fingerprint of the server's leaf certificate, as 64 hex characters.
+ * Colons and whitespace between hex pairs, and either letter case,
+ * are accepted; stored exactly as given.
+ *
+ * Returns: the server certificate hash, or %NULL if unset
+ *
+ * Since: 1.60
+ **/
+const char *
+nm_setting_802_1x_get_server_cert_hash(NMSetting8021x *setting)
+{
+    g_return_val_if_fail(NM_IS_SETTING_802_1X(setting), NULL);
+
+    return NM_SETTING_802_1X_GET_PRIVATE(setting)->server_cert_hash;
 }
 
 /**
@@ -2801,6 +2825,27 @@ static const EAPMethodsTable eap_methods_table[] = {
     {"external", NULL, NULL},
     {NULL, NULL, NULL}};
 
+/* Lenient on how the hash is typed (colons/spaces as separators between hex
+ * pairs, either letter case - same tolerance as NM's MAC address properties),
+ * strict on what it has to amount to: exactly 64 hex digits (a SHA-256).
+ * No normalization: stored exactly as given, matching the MAC address
+ * property precedent (nm_utils_hwaddr_valid() in nm-setting-wired.c). */
+static gboolean
+_server_cert_hash_valid(const char *value)
+{
+    gsize hex_len = 0;
+
+    for (; *value; value++) {
+        if (*value == ':' || g_ascii_isspace(*value))
+            continue;
+        if (!g_ascii_isxdigit(*value))
+            return FALSE;
+        hex_len++;
+    }
+
+    return hex_len == 64;
+}
+
 static gboolean
 verify(NMSetting *setting, NMConnection *connection, GError **error)
 {
@@ -3004,6 +3049,19 @@ verify(NMSetting *setting, NMConnection *connection, GError **error)
                        "%s.%s: ",
                        NM_SETTING_802_1X_SETTING_NAME,
                        NM_SETTING_802_1X_PHASE2_AUTHEAP);
+        return FALSE;
+    }
+
+    if (priv->server_cert_hash && !_server_cert_hash_valid(priv->server_cert_hash)) {
+        g_set_error_literal(error,
+                            NM_CONNECTION_ERROR,
+                            NM_CONNECTION_ERROR_INVALID_PROPERTY,
+                            _("must be 64 hex characters (a SHA-256 hash), optionally separated by"
+                              " colons or spaces"));
+        g_prefix_error(error,
+                       "%s.%s: ",
+                       NM_SETTING_802_1X_SETTING_NAME,
+                       NM_SETTING_802_1X_SERVER_CERT_HASH);
         return FALSE;
     }
 
@@ -3465,6 +3523,27 @@ nm_setting_802_1x_class_init(NMSetting8021xClass *klass)
                                               NM_SETTING_PARAM_NONE,
                                               NMSetting8021xPrivate,
                                               ca_path,
+                                              .direct_string_allow_empty = TRUE);
+
+    /**
+     * NMSetting8021x:server-cert-hash:
+     *
+     * Pins the authentication server's certificate by its SHA-256 hash,
+     * bypassing the need for a CA certificate to validate the incoming
+     * server certificate. 64 hex characters
+     * (the server leaf certificate's SHA-256 fingerprint);
+     * colons or spaces between hex pairs and either letter case are accepted,
+     * and the value is stored exactly as given.
+     *
+     * Since: 1.60
+     **/
+    _nm_setting_property_define_direct_string(properties_override,
+                                              obj_properties,
+                                              NM_SETTING_802_1X_SERVER_CERT_HASH,
+                                              PROP_SERVER_CERT_HASH,
+                                              NM_SETTING_PARAM_NONE,
+                                              NMSetting8021xPrivate,
+                                              server_cert_hash,
                                               .direct_string_allow_empty = TRUE);
 
     /**
