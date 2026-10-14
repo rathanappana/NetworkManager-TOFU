@@ -2151,6 +2151,7 @@ global:
 	nm_setting_bridge_port_get_root_block;
 	nm_setting_bridge_port_get_unicast_flood;
 	nm_setting_bridge_port_get_vlan_tunnel;
+	nm_setting_802_1x_get_server_cert_hash;
 	nm_setting_wifi_p2p_get_wps_pin;
 	nm_setting_wifi_p2p_get_wps_pin_flags;
 	nm_wifi_p2p_peer_get_wps_config_methods;
