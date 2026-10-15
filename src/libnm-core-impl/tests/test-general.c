@@ -5764,6 +5764,63 @@ test_setting_802_1x_changed_signal(void)
     g_object_unref(connection);
 }
 
+#define SHA256_HEX_64 "b439227a143eae2dc34c71351bd0c0a4d358cb4ec9d38da05e0bd50dfe42ae80"
+
+static void
+test_setting_802_1x_server_cert_hash(void)
+{
+    gs_unref_object NMSetting8021x *s_8021x = NULL;
+
+    s_8021x = (NMSetting8021x *) nm_setting_802_1x_new();
+    nm_setting_802_1x_add_eap_method(s_8021x, "ttls");
+    g_object_set(s_8021x, NM_SETTING_802_1X_IDENTITY, "bob", NULL);
+    g_object_set(s_8021x, NM_SETTING_802_1X_PHASE2_AUTH, "pap", NULL);
+
+    /* unset: fine, nothing to validate */
+    nmtst_assert_setting_verifies(NM_SETTING(s_8021x));
+
+    /* valid: mixed colons/spaces/case accepted, stored verbatim */
+    g_object_set(s_8021x,
+                 NM_SETTING_802_1X_SERVER_CERT_HASH,
+                 "B4:39 22 7A143EAE2dc34c71351bd0c0a4d358cb4ec9d38da05e0bd50dfe42ae80",
+                 NULL);
+    nmtst_assert_setting_verifies(NM_SETTING(s_8021x));
+    g_assert_cmpstr(nm_setting_802_1x_get_server_cert_hash(s_8021x),
+                    ==,
+                    "B4:39 22 7A143EAE2dc34c71351bd0c0a4d358cb4ec9d38da05e0bd50dfe42ae80");
+
+    /* non-hex character */
+    g_object_set(s_8021x, NM_SETTING_802_1X_SERVER_CERT_HASH, "zz" SHA256_HEX_64, NULL);
+    nmtst_assert_setting_verify_fails(NM_SETTING(s_8021x),
+                                      NM_CONNECTION_ERROR,
+                                      NM_CONNECTION_ERROR_INVALID_PROPERTY);
+
+    /* too short */
+    g_object_set(s_8021x, NM_SETTING_802_1X_SERVER_CERT_HASH, "ab", NULL);
+    nmtst_assert_setting_verify_fails(NM_SETTING(s_8021x),
+                                      NM_CONNECTION_ERROR,
+                                      NM_CONNECTION_ERROR_INVALID_PROPERTY);
+
+    /* too long */
+    g_object_set(s_8021x, NM_SETTING_802_1X_SERVER_CERT_HASH, SHA256_HEX_64 "ab", NULL);
+    nmtst_assert_setting_verify_fails(NM_SETTING(s_8021x),
+                                      NM_CONNECTION_ERROR,
+                                      NM_CONNECTION_ERROR_INVALID_PROPERTY);
+
+    /* ca-cert and server-cert-hash both set: they converge on the same
+     * wpa_supplicant ca_cert option, so can't coexist. */
+    g_object_set(s_8021x, NM_SETTING_802_1X_SERVER_CERT_HASH, SHA256_HEX_64, NULL);
+    {
+        gs_unref_bytes GBytes *fake_ca_cert =
+            g_bytes_new("not-a-real-cert", strlen("not-a-real-cert") + 1);
+
+        g_object_set(s_8021x, NM_SETTING_802_1X_CA_CERT, fake_ca_cert, NULL);
+    }
+    nmtst_assert_setting_verify_fails(NM_SETTING(s_8021x),
+                                      NM_CONNECTION_ERROR,
+                                      NM_CONNECTION_ERROR_INVALID_PROPERTY);
+}
+
 static void
 test_setting_old_uuid(void)
 {
@@ -12333,6 +12390,8 @@ main(int argc, char **argv)
                     test_setting_wireless_security_changed_signal);
     g_test_add_func("/core/general/test_setting_802_1x_changed_signal",
                     test_setting_802_1x_changed_signal);
+    g_test_add_func("/core/general/test_setting_802_1x_server_cert_hash",
+                    test_setting_802_1x_server_cert_hash);
     g_test_add_func("/core/general/test_setting_ip4_gateway", test_setting_ip4_gateway);
     g_test_add_func("/core/general/test_setting_ip6_gateway", test_setting_ip6_gateway);
     g_test_add_func("/core/general/test_setting_compare_default_strv",
