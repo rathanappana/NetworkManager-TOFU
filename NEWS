@@ -24,6 +24,9 @@ Core:
 * With Ethernet autonegotiation enabled, advertise all supported link modes
   matching the configured speed and duplex, including fibre and backplane
   modes.
+* Add new property `802-1x.server-cert-hash` that takes server hash,
+  used to verify the authentication server. Best use case for this property
+  is TOFU. Mutually exclusive with `802-1x.ca-cert` property.
 
 initrd:
 * Add the "rd.net.timeout.ip-required" kernel command line argument
