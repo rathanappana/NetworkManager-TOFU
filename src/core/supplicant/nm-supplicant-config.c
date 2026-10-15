@@ -1419,6 +1419,26 @@ add_pkcs11_uri_with_pin(NMSupplicantConfig        *self,
     return add_string_val(self, tmp, name, FALSE, tmp_log, error);
 }
 
+/* 802-1x.server-cert-hash accepts colons/spaces as separators and either
+ * hex case (NMSetting8021x's verify() already guarantees exactly 64 hex
+ * digits once those are stripped); wpa_supplicant's own hash:// syntax
+ * wants bare lowercase hex with no separators. Normalize here, at the
+ * boundary where the value actually reaches wpa_supplicant - the stored
+ * property itself keeps whatever the user typed, unchanged. */
+static char *
+_server_cert_hash_to_hex(const char *value)
+{
+    GString *hex = g_string_sized_new(64);
+
+    for (; *value; value++) {
+        if (*value == ':' || g_ascii_isspace(*value))
+            continue;
+        g_string_append_c(hex, g_ascii_tolower(*value));
+    }
+
+    return g_string_free(hex, FALSE);
+}
+
 gboolean
 nm_supplicant_config_add_setting_8021x(NMSupplicantConfig *self,
                                        NMSetting8021x     *setting,
@@ -1717,6 +1737,20 @@ nm_supplicant_config_add_setting_8021x(NMSupplicantConfig *self,
         g_return_val_if_fail(ca_cert_override || !priv->private_user, FALSE);
         if (!add_string_val(self, path, "ca_cert", FALSE, NULL, error))
             return FALSE;
+    } else {
+        /* No CA certificate configured by any of the above - fall back to
+         * pinning the server's leaf certificate by hash, if given. verify()
+         * guarantees ca-cert and server-cert-hash are never both set, so
+         * reaching here with a hash means ca_cert is otherwise empty. */
+        const char *server_cert_hash = nm_setting_802_1x_get_server_cert_hash(setting);
+
+        if (server_cert_hash) {
+            gs_free char *hex      = _server_cert_hash_to_hex(server_cert_hash);
+            gs_free char *hash_uri = g_strdup_printf("hash://server/sha256/%s", hex);
+
+            if (!add_string_val(self, hash_uri, "ca_cert", FALSE, NULL, error))
+                return FALSE;
+        }
     }
 
     /* Phase 2 CA certificate */
