@@ -35,6 +35,10 @@ Core:
 * Checkpoint rollback reactivates connections that are still being
   deactivated, keeping external bridge ports attached, and no longer
   reactivates unchanged activations of a multi-connect profile.
+* Add new property `802-1x.server-cert-hash` that takes server hash,
+  used to verify the authentication server. Best use case for this property
+  is TOFU. Mutually exclusive with `802-1x.ca-cert`, `802-1x.ca-path`,
+  `802-1x.system-ca-certs` properties.
 
 initrd:
 * Add the "rd.net.timeout.ip-required" kernel command line argument
