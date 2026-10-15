@@ -3096,6 +3096,20 @@ verify(NMSetting *setting, NMConnection *connection, GError **error)
         return FALSE;
     }
 
+    if (priv->server_cert_hash && (priv->ca_cert || priv->ca_path || priv->system_ca_certs)) {
+        g_set_error_literal(error,
+                            NM_CONNECTION_ERROR,
+                            NM_CONNECTION_ERROR_INVALID_PROPERTY,
+                            _("cannot be set together with the \"ca-cert\", "
+                              "\"system-ca-certs\" or \"ca-path\" property - both pin "
+                              "the authentication server, so use only one"));
+        g_prefix_error(error,
+                       "%s.%s: ",
+                       NM_SETTING_802_1X_SETTING_NAME,
+                       NM_SETTING_802_1X_SERVER_CERT_HASH);
+        return FALSE;
+    }
+
     if (!_cert_verify_property(priv->ca_cert,
                                NM_SETTING_802_1X_CA_CERT,
                                priv->ca_cert_password,
