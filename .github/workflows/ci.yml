@@ -1,0 +1,198 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+#
+# GitHub Actions port of .gitlab-ci.yml. The distribution list follows
+# .gitlab-ci/config.yml:
+#   tier 1: every push and pull request
+#   tier 2/3: on demand ("Run workflow" with tiers = 2 or 3); GitLab runs
+#     these as manual jobs. Tier 3 failures do not fail the run.
+#
+# Not ported: "triage:issues" (GitLab issue triage) and "clean-images"
+# (no prebuilt images here).
+
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      tiers:
+        description: Run distribution tiers up to
+        type: choice
+        options: ['1', '2', '3']
+        default: '1'
+  schedule:
+    # weekly, like the "weekly" scheduled pipeline (coverity)
+    - cron: '0 3 * * 0'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  tier1:
+    if: github.event_name != 'schedule'
+    strategy:
+      fail-fast: false
+      matrix:
+        select:
+          - meson+gcc+docs+valgrind
+          - meson+clang
+          - rpm+meson
+          - tarball+meson
+          - tarball
+          - subtree
+    uses: ./.github/workflows/nm-build.yml
+    with:
+      name: fedora-44-${{ matrix.select }}
+      image: registry.fedoraproject.org/fedora:44
+      install: fedora-install.sh
+      select: ${{ matrix.select }}
+      tarball: true
+
+  check-patch:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    container: registry.fedoraproject.org/fedora:44
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - run: dnf install -y git-core
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - run: bash .gitlab-ci/fedora-install.sh
+      - name: check-mr-description
+        env:
+          CI_MERGE_REQUEST_DESCRIPTION: ${{ github.event.pull_request.body }}
+        run: contrib/scripts/check-mr-description.sh
+      - name: checkpatch
+        run: NM_CHECKPATCH_FETCH_UPSTREAM=1 contrib/scripts/checkpatch-feature-branch.sh
+
+  check-tree:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    container: registry.fedoraproject.org/fedora:44
+    # Like GitLab: only blocking for the default branch and PRs into it.
+    continue-on-error: >-
+      ${{ (github.event_name == 'pull_request' && github.base_ref != github.event.repository.default_branch)
+       || (github.event_name == 'push' && github.ref_name != github.event.repository.default_branch) }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - run: dnf install -y git-core
+      - uses: actions/checkout@v4
+        with:
+          # check-commit-message.sh needs all commits in the range being checked.
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - run: bash .gitlab-ci/fedora-install.sh
+      - run: clang-format --version; black --version; pre-commit --version
+      - run: contrib/scripts/nm-code-format.sh -n
+      # "nm-clang-format" runs clang-format in a podman container, which is not
+      # available here. nm-code-format.sh checks the same thing with the
+      # clang-format of this image.
+      - run: SKIP=nm-clang-format pre-commit run --all-files
+      - name: check-commit-message
+        env:
+          CI_MERGE_REQUEST_DIFF_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: contrib/scripts/check-commit-message.sh --ci
+      - run: ci-fairy generate-template && git diff --exit-code
+      - run: meson setup build && [ "$(LANG=C ninja -C build NetworkManager-update-po 2>&1 1>/dev/null | grep -c 'warning:')" = 0 ]
+
+  tier2:
+    if: github.event_name == 'workflow_dispatch' && fromJSON(inputs.tiers) >= 2
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: fedora-rawhide,  image: 'registry.fedoraproject.org/fedora:rawhide', install: fedora-install.sh }
+          - { name: centos-stream10, image: 'quay.io/centos/centos:stream10',          install: fedora-install.sh }
+          - { name: centos-stream9,  image: 'quay.io/centos/centos:stream9',           install: fedora-install.sh }
+          - { name: ubuntu-devel,    image: 'ubuntu:devel',                            install: debian-install.sh }
+          - { name: debian-testing,  image: 'debian:testing',                          install: debian-install.sh }
+          - { name: debian-sid,      image: 'debian:sid',                              install: debian-install.sh }
+          - { name: alpine-edge,     image: 'alpine:edge',                             install: alpine-install.sh }
+    uses: ./.github/workflows/nm-build.yml
+    with:
+      name: ${{ matrix.name }}
+      image: ${{ matrix.image }}
+      install: ${{ matrix.install }}
+
+  tier3:
+    if: github.event_name == 'workflow_dispatch' && fromJSON(inputs.tiers) >= 3
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: fedora-43,    image: 'registry.fedoraproject.org/fedora:43', install: fedora-install.sh }
+          - { name: ubuntu-26.04, image: 'ubuntu:26.04',                         install: debian-install.sh }
+          - { name: ubuntu-24.04, image: 'ubuntu:24.04',                         install: debian-install.sh }
+          - { name: ubuntu-22.04, image: 'ubuntu:22.04',                         install: debian-install.sh }
+          - { name: debian-13,    image: 'debian:13',                            install: debian-install.sh }
+          - { name: alpine-3.24,  image: 'alpine:3.24',                          install: alpine-install.sh }
+          - { name: alpine-3.23,  image: 'alpine:3.23',                          install: alpine-install.sh }
+          - { name: alpine-3.22,  image: 'alpine:3.22',                          install: alpine-install.sh }
+          - { name: alpine-3.21,  image: 'alpine:3.21',                          install: alpine-install.sh }
+          - { name: arch-rolling, image: 'archlinux:latest',                     install: arch-install.sh }
+    uses: ./.github/workflows/nm-build.yml
+    with:
+      name: ${{ matrix.name }}
+      image: ${{ matrix.image }}
+      install: ${{ matrix.install }}
+      allow-failure: true
+
+  # Publish the API docs from the default branch. Needs
+  # Settings -> Pages -> Source: "GitHub Actions".
+  pages:
+    if: github.event_name == 'push' && github.ref_name == github.event.repository.default_branch
+    needs: tier1
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: fedora-44-meson+gcc+docs+valgrind
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs-html
+      - id: deploy
+        uses: actions/deploy-pages@v4
+
+  # Needs the repository secrets COVERITY_SCAN_PROJECT_NAME,
+  # COVERITY_SCAN_TOKEN and COVERITY_SCAN_EMAIL.
+  coverity:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    container: registry.fedoraproject.org/fedora:44
+    defaults:
+      run:
+        shell: bash
+    env:
+      COVERITY_SCAN_PROJECT_NAME: ${{ secrets.COVERITY_SCAN_PROJECT_NAME }}
+      COVERITY_SCAN_TOKEN: ${{ secrets.COVERITY_SCAN_TOKEN }}
+      GITLAB_USER_EMAIL: ${{ secrets.COVERITY_SCAN_EMAIL }}
+    steps:
+      - run: dnf install -y git-core curl
+      - uses: actions/checkout@v4
+      - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - run: bash .gitlab-ci/fedora-install.sh
+      - run: CC=gcc CONFIGURE_ONLY=1 contrib/scripts/nm-ci-run.sh
+      - working-directory: build
+        run: |
+          export CI_COMMIT_TITLE="$(git log -1 --format=%s)"
+          ../.gitlab-ci/coverity.sh download
+          cov-analysis-linux64-*/bin/cov-build --dir cov-int ninja
+          ../.gitlab-ci/coverity.sh upload
