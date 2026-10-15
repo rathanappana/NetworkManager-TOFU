@@ -1,0 +1,98 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+#
+# Reusable build+test job, the GitHub counterpart of ".build@template" in
+# .gitlab-ci.yml. GitLab builds a container image per distribution in a
+# "prep" stage; here the distribution's install script runs in each job.
+
+name: nm-build
+
+on:
+  workflow_call:
+    inputs:
+      name:
+        description: Unique name, used for the artifact
+        required: true
+        type: string
+      image:
+        description: Container image to build in
+        required: true
+        type: string
+      install:
+        description: Script in .gitlab-ci/ that installs the build dependencies
+        required: true
+        type: string
+      select:
+        description: NM_TEST_SELECT_RUN value for .gitlab-ci/run-test.sh
+        default: all
+        type: string
+      tarball:
+        description: Build the tarball and keep docs/tarball/srpm (".nm_artifacts")
+        default: false
+        type: boolean
+      allow-failure:
+        default: false
+        type: boolean
+
+jobs:
+  build:
+    name: ${{ inputs.name }}
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ inputs.image }}
+      # The n-acd/n-dhcp4 subtree tests create user, network and mount
+      # namespaces and mount tmpfs on /run. Docker's default seccomp and
+      # AppArmor profiles block that; GitLab runners allow it.
+      options: --privileged
+    continue-on-error: ${{ inputs.allow-failure }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      NM_TEST_SELECT_RUN: ${{ inputs.select }}
+      NM_BUILD_TARBALL: ${{ inputs.tarball && '1' || '' }}
+    steps:
+      # actions/checkout needs git to create a real repository, and
+      # run-test.sh needs bash. Minimal images ship neither.
+      - name: Install git and bash
+        shell: sh
+        run: |
+          if command -v dnf >/dev/null; then
+            dnf install -y git-core bash
+          elif command -v apt-get >/dev/null; then
+            apt-get update
+            DEBIAN_FRONTEND=noninteractive apt-get install -y git ca-certificates
+          elif command -v apk >/dev/null; then
+            apk add bash git
+          elif command -v pacman >/dev/null; then
+            pacman -Sy --noconfirm git
+          fi
+
+      - uses: actions/checkout@v4
+
+      # The workspace is owned by the runner user, not by root in the
+      # container. run-test.sh runs "git clean" and "git diff".
+      - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Install dependencies
+        run: bash .gitlab-ci/${{ inputs.install }}
+
+      - name: Build and test
+        run: |
+          env
+          r=0
+          .gitlab-ci/run-test.sh 2>&1 | tee /tmp/nm-test.log || r=$?
+          mv /tmp/nm-test.log .
+          exit $r
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ${{ inputs.name }}
+          retention-days: 5
+          if-no-files-found: ignore
+          path: |
+            docs-html
+            NetworkManager-1*.tar.xz
+            NetworkManager-1*.src.rpm
+            nm-test.log
+            testlog.txt
