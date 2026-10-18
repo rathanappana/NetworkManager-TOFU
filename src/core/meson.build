@@ -157,6 +157,7 @@ libNetworkManager = static_library(
     'supplicant/nm-supplicant-settings-verify.c',
     'vpn/nm-vpn-connection.c',
     'vpn/nm-vpn-manager.c',
+    'tofu/nm-tofu.c',
     'nm-active-connection.c',
     'nm-act-request.c',
     'nm-audit-manager.c',
@@ -183,7 +184,7 @@ libNetworkManager = static_library(
     'nm-power-monitor.c',
     'nm-priv-helper-call.c',
   ),
-  dependencies: nm_deps,
+  dependencies: nm_deps + [crypto_gnutls_dep],
   link_with: [
     libNetworkManagerBase,
     libnm_systemd_core,

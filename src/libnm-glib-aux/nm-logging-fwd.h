@@ -49,6 +49,7 @@ typedef enum {
     LOGD_SYSTEMD    = (1LL << 35),
     LOGD_VPN_PLUGIN = (1LL << 36),
     LOGD_PROXY      = (1LL << 37),
+    LOGD_TOFU       = (1LL << 38), /* "Trust On First Use" (TOFU) for Wi-Fi */
 
     __LOGD_MAX,
     LOGD_ALL     = (((__LOGD_MAX - 1LL) << 1) - 1LL),

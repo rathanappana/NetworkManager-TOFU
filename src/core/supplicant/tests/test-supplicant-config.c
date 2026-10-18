@@ -696,6 +696,7 @@ test_wifi_eap_locked_bssid(void)
     NMTST_EXPECT_NM_INFO("Config: added 'fragment_size' value '1086'");
     NMTST_EXPECT_NM_INFO("Config: added 'ca_cert' value '*/test-ca-cert.pem'");
     NMTST_EXPECT_NM_INFO("Config: added 'private_key' value '*/test-cert.p12'");
+    NMTST_EXPECT_NM_INFO("Config: added 'anonymous_identity' value 'anonymous'");
     NMTST_EXPECT_NM_INFO("Config: added 'proactive_key_caching' value '1'");
     config_dict = build_supplicant_config(connection, mtu, 0, NM_SUPPL_CAP_MASK_NONE);
     g_test_assert_expected_messages();
@@ -743,6 +744,7 @@ test_wifi_eap_unlocked_bssid(void)
     NMTST_EXPECT_NM_INFO("Config: added 'fragment_size' value '1086'");
     NMTST_EXPECT_NM_INFO("Config: added 'ca_cert' value '*/test-ca-cert.pem'");
     NMTST_EXPECT_NM_INFO("Config: added 'private_key' value '*/test-cert.p12'");
+    NMTST_EXPECT_NM_INFO("Config: added 'anonymous_identity' value 'anonymous'");
     NMTST_EXPECT_NM_INFO("Config: added 'proactive_key_caching' value '1'");
     NMTST_EXPECT_NM_INFO("Config: added 'bgscan' value 'simple:30:-65:300'");
     config_dict = build_supplicant_config(connection, mtu, 0, NM_SUPPL_CAP_MASK_T_FILS_YES);
@@ -795,6 +797,7 @@ test_wifi_eap_fils_disabled(void)
     NMTST_EXPECT_NM_INFO("Config: added 'fragment_size' value '1086'");
     NMTST_EXPECT_NM_INFO("Config: added 'ca_cert' value '*/test-ca-cert.pem'");
     NMTST_EXPECT_NM_INFO("Config: added 'private_key' value '*/test-cert.p12'");
+    NMTST_EXPECT_NM_INFO("Config: added 'anonymous_identity' value 'anonymous'");
     NMTST_EXPECT_NM_INFO("Config: added 'proactive_key_caching' value '1'");
     NMTST_EXPECT_NM_INFO("Config: added 'bgscan' value 'simple:30:-65:300'");
     config_dict =
@@ -848,6 +851,7 @@ test_wifi_eap_suite_b_generation(void)
     NMTST_EXPECT_NM_INFO("Config: added 'fragment_size' value '1086'");
     NMTST_EXPECT_NM_INFO("Config: added 'ca_cert' value '*/test-ca-cert.pem'");
     NMTST_EXPECT_NM_INFO("Config: added 'private_key' value '*/test-cert.p12'");
+    NMTST_EXPECT_NM_INFO("Config: added 'anonymous_identity' value 'anonymous'");
     NMTST_EXPECT_NM_INFO("Config: added 'proactive_key_caching' value '1'");
     config_dict = build_supplicant_config(connection, mtu, 0, NM_SUPPL_CAP_MASK_T_PMF_YES);
     g_test_assert_expected_messages();

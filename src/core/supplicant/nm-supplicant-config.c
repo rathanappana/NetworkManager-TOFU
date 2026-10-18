@@ -324,6 +324,27 @@ nm_supplicant_config_fast_required(NMSupplicantConfig *self)
     return NM_SUPPLICANT_CONFIG_GET_PRIVATE(self)->fast_required;
 }
 
+void
+nm_supplicant_config_suppress_credentials_for_tofu(NMSupplicantConfig *self)
+{
+    NMSupplicantConfigPrivate *priv;
+
+    g_return_if_fail(NM_IS_SUPPLICANT_CONFIG(self));
+
+    priv = NM_SUPPLICANT_CONFIG_GET_PRIVATE(self);
+
+    /* Strip real credentials so wpa_supplicant cannot complete phase 2
+     * (EAP-MSCHAPv2) on the first TOFU connection attempt.  Phase 1 (TLS
+     * tunnel + Certification signals) still completes because anonymous_identity
+     * was already set by nm_supplicant_config_add_setting_8021x.  Credentials
+     * are never sent to an unverified AP; the user reviews and accepts the cert
+     * before a second attempt with full credentials. */
+    g_hash_table_remove(priv->config, "identity");
+    g_hash_table_remove(priv->config, "password");
+
+    nm_log_info(LOGD_SUPPLICANT, "tofu: stripped identity/password for first-use cert collection");
+}
+
 GVariant *
 nm_supplicant_config_to_variant(NMSupplicantConfig *self)
 {
@@ -831,6 +852,37 @@ add_string_val(NMSupplicantConfig *self,
                                                display_value,
                                                error);
     }
+    return TRUE;
+}
+
+/*
+ * nm_supplicant_config_set_ca_cert_hash:
+ *
+ * Injects a wpa_supplicant hash://server/sha256/<hex> URI directly into the
+ * supplicant config as ca_cert. This is wpa_supplicant's own native
+ * leaf-cert-pinning syntax, not something NM invents: it tells wpa_supplicant
+ * what to trust, the same way setting ca_cert to a file path does. NM does
+ * not verify the fingerprint itself — if it doesn't match what the server
+ * presents, wpa_supplicant's own TLS stack rejects the handshake natively.
+ */
+gboolean
+nm_supplicant_config_set_ca_cert_hash(NMSupplicantConfig *self,
+                                      const char         *hash_hex,
+                                      GError            **error)
+{
+    gs_free char *hash_uri = NULL;
+
+    g_return_val_if_fail(NM_IS_SUPPLICANT_CONFIG(self), FALSE);
+    g_return_val_if_fail(hash_hex && *hash_hex, FALSE);
+
+    hash_uri = g_strdup_printf("hash://server/sha256/%s", hash_hex);
+
+    if (!add_string_val(self, hash_uri, "ca_cert", FALSE, NULL, error))
+        return FALSE;
+
+    nm_log_info(LOGD_SUPPLICANT,
+                "tofu: injected ca_cert=hash://server/sha256/%.16s... for leaf cert pinning",
+                hash_hex);
     return TRUE;
 }
 
@@ -1705,6 +1757,22 @@ nm_supplicant_config_add_setting_8021x(NMSupplicantConfig *self,
                 return FALSE;
             }
             break;
+        case NM_SETTING_802_1X_CK_SCHEME_SERVER_HASH:
+            /* An opaque "hash://server/sha256/<hex>" URI, not a filesystem
+             * path — added directly here (like the PKCS11 case above), not
+             * via the shared `path` variable below: that path also carries
+             * a private_user restriction that exists only for PATH's
+             * file-read concern, which does not apply here (no file is
+             * ever read). */
+            if (!add_string_val(self,
+                                nm_setting_802_1x_get_ca_cert_uri(setting),
+                                "ca_cert",
+                                FALSE,
+                                NULL,
+                                error)) {
+                return FALSE;
+            }
+            break;
         default:
             break;
         }
@@ -1744,6 +1812,16 @@ nm_supplicant_config_add_setting_8021x(NMSupplicantConfig *self,
                     nm_setting_802_1x_get_phase2_ca_cert_password(setting),
                     nm_setting_802_1x_get_phase2_ca_cert_password_flags(setting),
                     error)) {
+                return FALSE;
+            }
+            break;
+        case NM_SETTING_802_1X_CK_SCHEME_SERVER_HASH:
+            if (!add_string_val(self,
+                                nm_setting_802_1x_get_phase2_ca_cert_uri(setting),
+                                "ca_cert2",
+                                FALSE,
+                                NULL,
+                                error)) {
                 return FALSE;
             }
             break;
@@ -2025,9 +2103,22 @@ nm_supplicant_config_add_setting_8021x(NMSupplicantConfig *self,
     value = nm_setting_802_1x_get_identity(setting);
     if (!add_string_val(self, value, "identity", FALSE, NULL, error))
         return FALSE;
+
+    /* If the user did not configure anonymous_identity, derive one from the
+     * real identity for phase 1 EAP-Identity privacy: user@realm → anonymous@realm,
+     * or just "anonymous" when there is no realm component. */
     value = nm_setting_802_1x_get_anonymous_identity(setting);
-    if (!add_string_val(self, value, "anonymous_identity", FALSE, NULL, error))
-        return FALSE;
+    if (value && *value) {
+        if (!add_string_val(self, value, "anonymous_identity", FALSE, NULL, error))
+            return FALSE;
+    } else {
+        const char   *ident   = nm_setting_802_1x_get_identity(setting);
+        const char   *at      = ident ? strchr(ident, '@') : NULL;
+        gs_free char *derived = at ? g_strdup_printf("anonymous%s", at) : g_strdup("anonymous");
+
+        if (!add_string_val(self, derived, "anonymous_identity", FALSE, NULL, error))
+            return FALSE;
+    }
     value = nm_setting_802_1x_get_openssl_ciphers(setting);
     if (value && !add_string_val(self, value, "openssl_ciphers", FALSE, NULL, error))
         return FALSE;
