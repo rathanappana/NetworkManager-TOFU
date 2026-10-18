@@ -76,8 +76,8 @@ gboolean nm_agent_manager_all_agents_have_capability(NMAgentManager           *m
                                                      NMSecretAgentCapabilities capability);
 
 NMSecretAgent *nm_agent_manager_find_secret_agent(NMAgentManager           *self,
-                                                  NMConnection              *connection,
-                                                  NMAuthSubject             *subject,
-                                                  NMSecretAgentCapabilities  capability);
+                                                  NMConnection             *connection,
+                                                  NMAuthSubject            *subject,
+                                                  NMSecretAgentCapabilities capability);
 
 #endif /* __NETWORKMANAGER_AGENT_MANAGER_H__ */

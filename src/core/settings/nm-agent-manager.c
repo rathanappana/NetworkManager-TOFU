@@ -1561,13 +1561,13 @@ nm_agent_manager_all_agents_have_capability(NMAgentManager           *manager,
  */
 NMSecretAgent *
 nm_agent_manager_find_secret_agent(NMAgentManager           *self,
-                                   NMConnection              *connection,
-                                   NMAuthSubject             *subject,
-                                   NMSecretAgentCapabilities  capability)
+                                   NMConnection             *connection,
+                                   NMAuthSubject            *subject,
+                                   NMSecretAgentCapabilities capability)
 {
     NMAgentManagerPrivate *priv;
-    NMSecretAgent          *agent;
-    gboolean                subject_is_unix_process =
+    NMSecretAgent         *agent;
+    gboolean               subject_is_unix_process =
         subject && (nm_auth_subject_get_subject_type(subject) == NM_AUTH_SUBJECT_TYPE_UNIX_PROCESS);
     gulong subject_uid =
         subject_is_unix_process ? nm_auth_subject_get_unix_process_uid(subject) : 0u;
