@@ -41,6 +41,7 @@
 #include "nm-wifi-common.h"
 #include "libnm-core-intern/nm-core-internal.h"
 #include "nm-config.h"
+#include "tofu/nm-tofu.h"
 
 #define _NMLOG_DEVICE_TYPE NMDeviceWifi
 #include "devices/nm-device-logging.h"
@@ -111,10 +112,10 @@ typedef struct {
 
     guint periodic_update_id;
 
-    guint link_timeout_id;
-    guint reacquire_iface_id;
-    guint wps_timeout_id;
-    guint sup_timeout_id; /* supplicant association timeout */
+    guint    link_timeout_id;
+    guint    reacquire_iface_id;
+    guint    wps_timeout_id;
+    GSource *sup_timeout_source;
 
     _NMDeviceWifiCapabilities    capabilities;
     _NMSettingWirelessWakeOnWLan wowlan_restore;
@@ -2108,7 +2109,7 @@ cleanup_association_attempt(NMDeviceWifi *self, gboolean disconnect)
 {
     NMDeviceWifiPrivate *priv = NM_DEVICE_WIFI_GET_PRIVATE(self);
 
-    nm_clear_g_source(&priv->sup_timeout_id);
+    nm_clear_g_source_inst(&priv->sup_timeout_source);
     nm_clear_g_source(&priv->link_timeout_id);
     nm_clear_g_source(&priv->wps_timeout_id);
     if (disconnect && priv->sup_iface)
@@ -2604,7 +2605,7 @@ supplicant_iface_state(NMDeviceWifi              *self,
 
     switch (new_state) {
     case NM_SUPPLICANT_INTERFACE_STATE_COMPLETED:
-        nm_clear_g_source(&priv->sup_timeout_id);
+        nm_clear_g_source_inst(&priv->sup_timeout_source);
         nm_clear_g_source(&priv->link_timeout_id);
         nm_clear_g_source(&priv->wps_timeout_id);
 
@@ -3575,8 +3576,9 @@ act_stage2_config(NMDevice *device, NMDeviceStateReason *out_failure_reason)
     NMActRequest                       *request;
     NMActiveConnection                 *controller_ac;
     NMDevice                           *controller;
+    gboolean                            skip_sup_timeout = FALSE;
 
-    nm_clear_g_source(&priv->sup_timeout_id);
+    nm_clear_g_source_inst(&priv->sup_timeout_source);
     nm_clear_g_source(&priv->link_timeout_id);
     nm_clear_g_source(&priv->wps_timeout_id);
 
@@ -3661,11 +3663,78 @@ act_stage2_config(NMDevice *device, NMDeviceStateReason *out_failure_reason)
     } else
         nm_supplicant_interface_set_bridge(priv->sup_iface, NULL);
 
+    /* TOFU: fresh trust-on-first-use session. This is the only entry point
+     * for now — no independent NM-side certificate verification is done
+     * here anymore: wpa_supplicant's own TLS stack validates the chain
+     * (confirmed by testing that it completes correctly given the real
+     * chain the AP sends, root-only ca_cert included). NM's job is just to
+     * collect the observed certs for the user prompt and pin on accept.
+     * The CONFIGURED_CA / USER_TRUSTED_NO_CA re-verify-and-reissue-popup
+     * paths are removed for now; they'll come back redesigned around that
+     * same principle later. */
+    {
+        NMSetting8021x *s_8021x = nm_connection_get_setting_802_1x(connection);
+
+        if (s_8021x
+            && nm_setting_802_1x_get_ca_verify_mode(s_8021x)
+                   == NM_SETTING_802_1X_CA_VERIFY_MODE_TOFU
+            /* ca-verify-mode is a stable user-set policy toggle, not a
+             * one-shot trigger — it stays "tofu" even after a cert gets
+             * pinned. Gate entry on cert presence instead of resetting that
+             * setting behind the user's back: once a CA cert exists, step
+             * out of the way entirely and let the normal 802-1x path run
+             * (real credentials, wpa_supplicant validates against the
+             * pinned CA itself). This is a presence check, not the removed
+             * verify-and-deauth-on-mismatch logic — no re-validation here. */
+            && nm_setting_802_1x_get_ca_cert_scheme(s_8021x)
+                   == NM_SETTING_802_1X_CK_SCHEME_UNKNOWN) {
+            guint    n_eap = nm_setting_802_1x_get_num_eap_methods(s_8021x);
+            guint    i;
+            gboolean has_eap = FALSE;
+
+            for (i = 0; i < n_eap; i++) {
+                const char *method = nm_setting_802_1x_get_eap_method(s_8021x, i);
+
+                if (NM_IN_STRSET(method, "tls", "ttls", "peap")) {
+                    has_eap = TRUE;
+                    break;
+                }
+            }
+
+            if (has_eap) {
+                const char   *uuid     = nm_settings_connection_get_uuid(sett_conn);
+                gs_free char *ssid_str = NULL;
+                GBytes       *ssid_bytes;
+
+                ssid_bytes = nm_setting_wireless_get_ssid(s_wireless);
+                ssid_str   = ssid_bytes ? _nm_utils_ssid_to_utf8(ssid_bytes) : NULL;
+
+                nm_tofu_set_session(NM_TOFU_SESSION_TYPE_TOFU,
+                                    ssid_str,
+                                    uuid,
+                                    nm_active_connection_get_subject(NM_ACTIVE_CONNECTION(req)));
+                nm_supplicant_config_suppress_credentials_for_tofu(config);
+
+                /* Credentials are withheld until the user accepts the cert,
+                 * so EAP is expected to stall past the generic association
+                 * timeout while NM waits for wpa_supplicant's Certification
+                 * signal. tofu_stage3() deauthenticates as soon as the leaf
+                 * cert arrives, which cancels this timer anyway via the
+                 * normal deactivate path — skipping it here only matters if
+                 * the AP never sends anything at all for this attempt. */
+                skip_sup_timeout = TRUE;
+            }
+        }
+    }
+
     nm_supplicant_interface_assoc(priv->sup_iface, config, supplicant_iface_assoc_cb, self);
 
     /* Set up a timeout on the association attempt */
-    timeout              = nm_device_get_supplicant_timeout(NM_DEVICE(self));
-    priv->sup_timeout_id = g_timeout_add_seconds(timeout, supplicant_connection_timeout_cb, self);
+    if (!skip_sup_timeout) {
+        timeout = nm_device_get_supplicant_timeout(NM_DEVICE(self));
+        priv->sup_timeout_source =
+            nm_g_timeout_add_seconds_source(timeout, supplicant_connection_timeout_cb, self);
+    }
 
     if (!priv->periodic_update_id)
         priv->periodic_update_id = g_timeout_add_seconds(6, periodic_update_cb, self);
