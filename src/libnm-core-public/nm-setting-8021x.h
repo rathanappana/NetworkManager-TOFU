@@ -15,8 +15,9 @@
 
 G_BEGIN_DECLS
 
-#define NM_SETTING_802_1X_CERT_SCHEME_PREFIX_PATH   "file://"
-#define NM_SETTING_802_1X_CERT_SCHEME_PREFIX_PKCS11 "pkcs11:"
+#define NM_SETTING_802_1X_CERT_SCHEME_PREFIX_PATH        "file://"
+#define NM_SETTING_802_1X_CERT_SCHEME_PREFIX_PKCS11      "pkcs11:"
+#define NM_SETTING_802_1X_CERT_SCHEME_PREFIX_SERVER_HASH "hash://"
 
 /**
  * NMSetting8021xCKFormat:
@@ -47,6 +48,12 @@ typedef enum { /*< underscore_name=nm_setting_802_1x_ck_format >*/
  * to a file containing the certificate or key data
  * @NM_SETTING_802_1X_CK_SCHEME_PKCS11: certificate or key is stored as a
  * URI of an object on a PKCS#11 token
+ * @NM_SETTING_802_1X_CK_SCHEME_SERVER_HASH: for #NMSetting8021x:ca-cert or
+ * #NMSetting8021x:phase2-ca-cert: the CA certificate check is replaced by
+ * pinning the server (leaf) certificate's SHA-256 fingerprint directly,
+ * using wpa_supplicant's native "hash://server/sha256/<hex>" syntax.
+ * Any CA certificates in the server's chain are ignored; only the leaf
+ * certificate is matched.
  *
  * #NMSetting8021xCKScheme values indicate how a certificate or private key is
  * stored in the setting properties, either as a blob of the item's data, or as
@@ -57,6 +64,7 @@ typedef enum { /*< underscore_name=nm_setting_802_1x_ck_scheme >*/
                NM_SETTING_802_1X_CK_SCHEME_BLOB,
                NM_SETTING_802_1X_CK_SCHEME_PATH,
                NM_SETTING_802_1X_CK_SCHEME_PKCS11,
+               NM_SETTING_802_1X_CK_SCHEME_SERVER_HASH,
 } NMSetting8021xCKScheme;
 
 /**
@@ -95,6 +103,26 @@ typedef enum /*< underscore_name=nm_setting_802_1x_auth_flags, flags >*/ {
 
     NM_SETTING_802_1X_AUTH_FLAGS_ALL = 0x1FF,
 } NMSetting8021xAuthFlags;
+
+/**
+ * NMSetting8021xCaVerifyMode:
+ * @NM_SETTING_802_1X_CA_VERIFY_MODE_DEFAULT: Default CA verification behavior.
+ *   If a CA certificate is configured, the server certificate is verified
+ *   against it. If no CA certificate is configured, server certificate
+ *   verification is skipped (existing behavior).
+ * @NM_SETTING_802_1X_CA_VERIFY_MODE_TOFU: Trust-On-First-Use mode. Without a
+ *   CA certificate, NetworkManager prompts the user to accept the server
+ *   certificate on first connection and pins it for subsequent connections.
+ *
+ * Controls TLS server certificate verification for 802.1x connections when
+ * no CA certificate is configured.
+ *
+ * Since: 1.58
+ */
+typedef enum { /*< underscore_name=nm_setting_802_1x_ca_verify_mode >*/
+               NM_SETTING_802_1X_CA_VERIFY_MODE_DEFAULT = 0,
+               NM_SETTING_802_1X_CA_VERIFY_MODE_TOFU    = 1,
+} NMSetting8021xCaVerifyMode;
 
 #define NM_TYPE_SETTING_802_1X (nm_setting_802_1x_get_type())
 #define NM_SETTING_802_1X(obj) \
@@ -156,6 +184,7 @@ typedef enum /*< underscore_name=nm_setting_802_1x_auth_flags, flags >*/ {
 #define NM_SETTING_802_1X_AUTH_TIMEOUT                      "auth-timeout"
 #define NM_SETTING_802_1X_OPTIONAL                          "optional"
 #define NM_SETTING_802_1X_OPENSSL_CIPHERS                   "openssl-ciphers"
+#define NM_SETTING_802_1X_CA_VERIFY_MODE                    "ca-verify-mode"
 
 /* PRIVATE KEY NOTE: when setting PKCS#12 private keys directly via properties
  * using the "blob" scheme, the data must be passed in PKCS#12 binary format.
@@ -361,6 +390,8 @@ NM_AVAILABLE_IN_1_22
 gboolean nm_setting_802_1x_get_optional(NMSetting8021x *setting);
 NM_AVAILABLE_IN_1_48
 const char *nm_setting_802_1x_get_openssl_ciphers(NMSetting8021x *setting);
+NM_AVAILABLE_IN_1_58
+NMSetting8021xCaVerifyMode nm_setting_802_1x_get_ca_verify_mode(NMSetting8021x *setting);
 
 G_END_DECLS
 

@@ -2127,6 +2127,8 @@ global:
 	nm_setting_geneve_get_remote;
 	nm_setting_geneve_get_tos;
 	nm_setting_geneve_get_ttl;
+	nm_setting_802_1x_ca_verify_mode_get_type;
+	nm_setting_802_1x_get_ca_verify_mode;
 	nm_setting_geneve_get_type;
 	nm_setting_geneve_new;
 	nm_setting_ip4_config_clat_get_type;

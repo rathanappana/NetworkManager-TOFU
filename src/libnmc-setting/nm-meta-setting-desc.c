@@ -2339,6 +2339,7 @@ _get_fcn_cert_8021x(ARGS_GET_FCN)
         str = g_strdup(vtable->path_func(s_8021X));
         break;
     case NM_SETTING_802_1X_CK_SCHEME_PKCS11:
+    case NM_SETTING_802_1X_CK_SCHEME_SERVER_HASH:
         str = g_strdup(vtable->uri_func(s_8021X));
         break;
     case NM_SETTING_802_1X_CK_SCHEME_UNKNOWN:
@@ -2366,6 +2367,11 @@ _set_fcn_cert_8021x(ARGS_SET_FCN)
                 NM_STRLEN(NM_SETTING_802_1X_CERT_SCHEME_PREFIX_PKCS11))
         == 0)
         scheme = NM_SETTING_802_1X_CK_SCHEME_PKCS11;
+    else if (strncmp(value,
+                     NM_SETTING_802_1X_CERT_SCHEME_PREFIX_SERVER_HASH,
+                     NM_STRLEN(NM_SETTING_802_1X_CERT_SCHEME_PREFIX_SERVER_HASH))
+             == 0)
+        scheme = NM_SETTING_802_1X_CK_SCHEME_SERVER_HASH;
     else if (strncmp(value,
                      NM_SETTING_802_1X_CERT_SCHEME_PREFIX_PATH,
                      NM_STRLEN(NM_SETTING_802_1X_CERT_SCHEME_PREFIX_PATH))
@@ -5035,6 +5041,9 @@ static const NMMetaPropertyInfo *const property_infos_802_1X[] = {
     ),
     PROPERTY_INFO_WITH_DESC (NM_SETTING_802_1X_CA_PATH,
         .property_type =                &_pt_gobject_string,
+    ),
+    PROPERTY_INFO_WITH_DESC (NM_SETTING_802_1X_CA_VERIFY_MODE,
+        .property_type =                &_pt_gobject_enum,
     ),
     PROPERTY_INFO_WITH_DESC (NM_SETTING_802_1X_SUBJECT_MATCH,
         .property_type =                &_pt_gobject_string,
