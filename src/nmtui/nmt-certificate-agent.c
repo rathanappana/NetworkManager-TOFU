@@ -1,6 +1,6 @@
-/* SPDX-License-Identifier: GPL-2.0-or-later */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 /*
- * Copyright (C) 2025 Red Hat, Inc.
+ * Copyright (C) 2026 Red Hat, Inc.
  */
 
 #include "libnm-client-aux-extern/nm-default-client.h"
@@ -78,13 +78,13 @@ run_cert_dialog(const char *ssid,
                              "Expires:      %s\n"
                              "URL:          %s\n"
                              "\n%s"),
-                           ssid       ?: "",
-                           cn         ?: "",
-                           issuer     ?: "",
-                           org        ?: "",
-                           sha256     ?: "",
-                           exp        ?: "",
-                           url        ?: "",
+                           ssid ?: "",
+                           cn ?: "",
+                           issuer ?: "",
+                           org ?: "",
+                           sha256 ?: "",
+                           exp ?: "",
+                           url ?: "",
                            disclaimer ?: "");
 
     form = nmt_newt_form_new(_("Certificate Verification"));
@@ -118,10 +118,10 @@ run_cert_dialog(const char *ssid,
 
 static void
 handle_method_call(GDBusConnection       *conn,
-                   const gchar           *sender,
-                   const gchar           *object_path,
-                   const gchar           *iface,
-                   const gchar           *method_name,
+                   const char            *sender,
+                   const char            *object_path,
+                   const char            *iface,
+                   const char            *method_name,
                    GVariant              *params,
                    GDBusMethodInvocation *invocation,
                    gpointer               user_data)
@@ -167,8 +167,8 @@ static const GDBusInterfaceVTable cert_agent_vtable = {
 gboolean
 nmt_certificate_agent_register(void)
 {
-    GDBusNodeInfo      *node_info;
-    GDBusInterfaceInfo *iface_info;
+    GDBusNodeInfo             *node_info;
+    GDBusInterfaceInfo        *iface_info;
     gs_free_error GError      *error = NULL;
     gs_unref_variant GVariant *reply = NULL;
 
@@ -188,12 +188,12 @@ nmt_certificate_agent_register(void)
     iface_info = g_dbus_node_info_lookup_interface(node_info, CERT_AGENT_IFACE);
 
     s_reg_id = g_dbus_connection_register_object(s_conn,
-                                                  CERT_AGENT_OBJECT_PATH,
-                                                  iface_info,
-                                                  &cert_agent_vtable,
-                                                  NULL,
-                                                  NULL,
-                                                  &error);
+                                                 CERT_AGENT_OBJECT_PATH,
+                                                 iface_info,
+                                                 &cert_agent_vtable,
+                                                 NULL,
+                                                 NULL,
+                                                 &error);
     g_dbus_node_info_unref(node_info);
 
     if (!s_reg_id) {
@@ -207,19 +207,18 @@ nmt_certificate_agent_register(void)
      * what lets nm_agent_manager_find_secret_agent() (src/core/settings/
      * nm-agent-manager.c) find this process later, filtered by that
      * capability plus the real ACL/UID checks GetSecrets already applies. */
-    reply = g_dbus_connection_call_sync(s_conn,
-                                        "org.freedesktop.NetworkManager",
-                                        "/org/freedesktop/NetworkManager/AgentManager",
-                                        "org.freedesktop.NetworkManager.AgentManager",
-                                        "RegisterWithCapabilities",
-                                        g_variant_new("(su)",
-                                                      "nmtui-tofu",
-                                                      (guint32) NM_SECRET_AGENT_CAPABILITY_WIFI_TOFU),
-                                        NULL,
-                                        G_DBUS_CALL_FLAGS_NONE,
-                                        5000,
-                                        NULL,
-                                        &error);
+    reply = g_dbus_connection_call_sync(
+        s_conn,
+        "org.freedesktop.NetworkManager",
+        "/org/freedesktop/NetworkManager/AgentManager",
+        "org.freedesktop.NetworkManager.AgentManager",
+        "RegisterWithCapabilities",
+        g_variant_new("(su)", "nmtui-tofu", (guint32) NM_SECRET_AGENT_CAPABILITY_WIFI_TOFU),
+        NULL,
+        G_DBUS_CALL_FLAGS_NONE,
+        5000,
+        NULL,
+        &error);
     if (!reply) {
         g_warning("CertificateAgent: RegisterWithCapabilities failed: %s", error->message);
         g_dbus_connection_unregister_object(s_conn, s_reg_id);

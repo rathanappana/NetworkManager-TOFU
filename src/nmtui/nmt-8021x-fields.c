@@ -88,7 +88,7 @@ ca_verify_mode_widget_changed(GObject *object, GParamSpec *pspec, gpointer user_
 {
     NMSetting8021x *setting   = user_data;
     const char     *active_id = nmt_newt_popup_get_active_id(NMT_NEWT_POPUP(object));
-    gint            mode;
+    int             mode;
 
     mode = nm_streq0(active_id, "1") ? NM_SETTING_802_1X_CA_VERIFY_MODE_TOFU
                                      : NM_SETTING_802_1X_CA_VERIFY_MODE_DEFAULT;
@@ -100,7 +100,7 @@ static void
 ca_verify_mode_setting_changed(GObject *object, GParamSpec *pspec, gpointer user_data)
 {
     NMSetting8021x *setting = NM_SETTING_802_1X(object);
-    gint            mode    = nm_setting_802_1x_get_ca_verify_mode(setting);
+    int             mode    = nm_setting_802_1x_get_ca_verify_mode(setting);
     const char     *id      = mode == NM_SETTING_802_1X_CA_VERIFY_MODE_TOFU ? "1" : "0";
 
     nmt_newt_popup_set_active_id(NMT_NEWT_POPUP(user_data), id);
@@ -112,7 +112,7 @@ eap_populate_ca_verify_mode(EapMethod *method, NmtNewtWidget *subgrid)
     static NmtNewtPopupEntry ca_verify_entries[] = {{N_("Default"), "0"},
                                                     {N_("Trust on First Use"), "1"},
                                                     {NULL, NULL}};
-    NmtNewtWidget *widget;
+    NmtNewtWidget           *widget;
 
     widget = nmt_newt_popup_new(ca_verify_entries);
     g_signal_connect(widget,
