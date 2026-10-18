@@ -468,26 +468,26 @@ _cert_get_path(GBytes *bytes)
     G_STMT_END
 
 /* PKCS11 URIs and server-hash pins are stored as-is, unlike PATH values. */
-#define _cert_impl_get_uri(setting, cert_field)                               \
-    G_STMT_START                                                              \
-    {                                                                         \
-        NMSetting8021x *const _setting = (setting);                           \
-        GBytes               *_cert;                                          \
-        NMSetting8021xCKScheme _scheme;                                       \
-                                                                              \
-        g_return_val_if_fail(NM_IS_SETTING_802_1X(_setting), NULL);           \
-                                                                              \
-        _cert = NM_SETTING_802_1X_GET_PRIVATE(_setting)->cert_field;          \
-                                                                              \
-        _scheme = _nm_setting_802_1x_cert_get_scheme(_cert, NULL);            \
-        g_return_val_if_fail(NM_IN_SET(_scheme,                               \
-                                       NM_SETTING_802_1X_CK_SCHEME_PKCS11,    \
+#define _cert_impl_get_uri(setting, cert_field)                                  \
+    G_STMT_START                                                                 \
+    {                                                                            \
+        NMSetting8021x *const  _setting = (setting);                             \
+        GBytes                *_cert;                                            \
+        NMSetting8021xCKScheme _scheme;                                          \
+                                                                                 \
+        g_return_val_if_fail(NM_IS_SETTING_802_1X(_setting), NULL);              \
+                                                                                 \
+        _cert = NM_SETTING_802_1X_GET_PRIVATE(_setting)->cert_field;             \
+                                                                                 \
+        _scheme = _nm_setting_802_1x_cert_get_scheme(_cert, NULL);               \
+        g_return_val_if_fail(NM_IN_SET(_scheme,                                  \
+                                       NM_SETTING_802_1X_CK_SCHEME_PKCS11,       \
                                        NM_SETTING_802_1X_CK_SCHEME_SERVER_HASH), \
-                             NULL);                                           \
-                                                                              \
-        return g_bytes_get_data(_cert, NULL);                                 \
-    }                                                                         \
-    G_STMT_END
+                             NULL);                                              \
+                                                                                 \
+        return g_bytes_get_data(_cert, NULL);                                    \
+    }
+G_STMT_END
 
 static gboolean
 _cert_impl_set(NMSetting8021x         *setting,
@@ -599,8 +599,8 @@ _cert_impl_set(NMSetting8021x         *setting,
     case PROP_PHASE2_CA_CERT:
         if (value
             && !NM_IN_SET(scheme,
-                         NM_SETTING_802_1X_CK_SCHEME_PKCS11,
-                         NM_SETTING_802_1X_CK_SCHEME_SERVER_HASH)
+                          NM_SETTING_802_1X_CK_SCHEME_PKCS11,
+                          NM_SETTING_802_1X_CK_SCHEME_SERVER_HASH)
             && format != NM_CRYPTO_FILE_FORMAT_X509) {
             /* wpa_supplicant can only use raw x509 CA certs */
             g_set_error_literal(error,
@@ -2586,8 +2586,7 @@ nm_setting_802_1x_get_openssl_ciphers(NMSetting8021x *setting)
 NMSetting8021xCaVerifyMode
 nm_setting_802_1x_get_ca_verify_mode(NMSetting8021x *setting)
 {
-    g_return_val_if_fail(NM_IS_SETTING_802_1X(setting),
-                         NM_SETTING_802_1X_CA_VERIFY_MODE_DEFAULT);
+    g_return_val_if_fail(NM_IS_SETTING_802_1X(setting), NM_SETTING_802_1X_CA_VERIFY_MODE_DEFAULT);
 
     return NM_SETTING_802_1X_GET_PRIVATE(setting)->ca_verify_mode;
 }

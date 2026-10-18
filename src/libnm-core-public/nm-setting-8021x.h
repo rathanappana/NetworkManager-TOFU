@@ -15,8 +15,8 @@
 
 G_BEGIN_DECLS
 
-#define NM_SETTING_802_1X_CERT_SCHEME_PREFIX_PATH   "file://"
-#define NM_SETTING_802_1X_CERT_SCHEME_PREFIX_PKCS11 "pkcs11:"
+#define NM_SETTING_802_1X_CERT_SCHEME_PREFIX_PATH        "file://"
+#define NM_SETTING_802_1X_CERT_SCHEME_PREFIX_PKCS11      "pkcs11:"
 #define NM_SETTING_802_1X_CERT_SCHEME_PREFIX_SERVER_HASH "hash://"
 
 /**
@@ -119,7 +119,7 @@ typedef enum /*< underscore_name=nm_setting_802_1x_auth_flags, flags >*/ {
  *
  * Since: 1.58
  */
-typedef enum { /*< underscore_name=nm_setting_802_1x_ca_verify_mode >*/
+typedef enum /*< underscore_name=nm_setting_802_1x_ca_verify_mode >*/ {
     NM_SETTING_802_1X_CA_VERIFY_MODE_DEFAULT = 0,
     NM_SETTING_802_1X_CA_VERIFY_MODE_TOFU    = 1,
 } NMSetting8021xCaVerifyMode;
