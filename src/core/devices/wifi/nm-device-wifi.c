@@ -112,10 +112,10 @@ typedef struct {
 
     guint periodic_update_id;
 
-    guint link_timeout_id;
-    guint reacquire_iface_id;
-    guint wps_timeout_id;
-    guint sup_timeout_id; /* supplicant association timeout */
+    guint    link_timeout_id;
+    guint    reacquire_iface_id;
+    guint    wps_timeout_id;
+    GSource *sup_timeout_source;
 
     _NMDeviceWifiCapabilities    capabilities;
     _NMSettingWirelessWakeOnWLan wowlan_restore;
@@ -2109,7 +2109,7 @@ cleanup_association_attempt(NMDeviceWifi *self, gboolean disconnect)
 {
     NMDeviceWifiPrivate *priv = NM_DEVICE_WIFI_GET_PRIVATE(self);
 
-    nm_clear_g_source(&priv->sup_timeout_id);
+    nm_clear_g_source_inst(&priv->sup_timeout_source);
     nm_clear_g_source(&priv->link_timeout_id);
     nm_clear_g_source(&priv->wps_timeout_id);
     if (disconnect && priv->sup_iface)
@@ -2605,7 +2605,7 @@ supplicant_iface_state(NMDeviceWifi              *self,
 
     switch (new_state) {
     case NM_SUPPLICANT_INTERFACE_STATE_COMPLETED:
-        nm_clear_g_source(&priv->sup_timeout_id);
+        nm_clear_g_source_inst(&priv->sup_timeout_source);
         nm_clear_g_source(&priv->link_timeout_id);
         nm_clear_g_source(&priv->wps_timeout_id);
 
@@ -3578,7 +3578,7 @@ act_stage2_config(NMDevice *device, NMDeviceStateReason *out_failure_reason)
     NMDevice                           *controller;
     gboolean                            skip_sup_timeout = FALSE;
 
-    nm_clear_g_source(&priv->sup_timeout_id);
+    nm_clear_g_source_inst(&priv->sup_timeout_source);
     nm_clear_g_source(&priv->link_timeout_id);
     nm_clear_g_source(&priv->wps_timeout_id);
 
@@ -3686,8 +3686,9 @@ act_stage2_config(NMDevice *device, NMDeviceStateReason *out_failure_reason)
              * (real credentials, wpa_supplicant validates against the
              * pinned CA itself). This is a presence check, not the removed
              * verify-and-deauth-on-mismatch logic — no re-validation here. */
-            && nm_setting_802_1x_get_ca_cert_scheme(s_8021x) == NM_SETTING_802_1X_CK_SCHEME_UNKNOWN) {
-            guint    n_eap   = nm_setting_802_1x_get_num_eap_methods(s_8021x);
+            && nm_setting_802_1x_get_ca_cert_scheme(s_8021x)
+                   == NM_SETTING_802_1X_CK_SCHEME_UNKNOWN) {
+            guint    n_eap = nm_setting_802_1x_get_num_eap_methods(s_8021x);
             guint    i;
             gboolean has_eap = FALSE;
 
@@ -3730,8 +3731,9 @@ act_stage2_config(NMDevice *device, NMDeviceStateReason *out_failure_reason)
 
     /* Set up a timeout on the association attempt */
     if (!skip_sup_timeout) {
-        timeout              = nm_device_get_supplicant_timeout(NM_DEVICE(self));
-        priv->sup_timeout_id = g_timeout_add_seconds(timeout, supplicant_connection_timeout_cb, self);
+        timeout = nm_device_get_supplicant_timeout(NM_DEVICE(self));
+        priv->sup_timeout_source =
+            nm_g_timeout_add_seconds_source(timeout, supplicant_connection_timeout_cb, self);
     }
 
     if (!priv->periodic_update_id)
