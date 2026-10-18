@@ -867,8 +867,8 @@ add_string_val(NMSupplicantConfig *self,
  */
 gboolean
 nm_supplicant_config_set_ca_cert_hash(NMSupplicantConfig *self,
-                                       const char         *hash_hex,
-                                       GError            **error)
+                                      const char         *hash_hex,
+                                      GError            **error)
 {
     gs_free char *hash_uri = NULL;
 

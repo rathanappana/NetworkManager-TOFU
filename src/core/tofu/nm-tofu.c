@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0-or-later */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 /*
  * Copyright (C) 2025 Red Hat, Inc.
  */
@@ -43,17 +43,16 @@
  * equivalents) is registered via AgentManager.RegisterWithCapabilities +
  * NM_SECRET_AGENT_CAPABILITY_WIFI_TOFU, so nm_agent_manager_find_secret_agent()
  * can find it — no separate registration entry point needed. */
-#define CERT_AGENT_OBJECT_PATH "/org/freedesktop/NetworkManager/CertificateAgent"
-#define CERT_AGENT_IFACE       "org.freedesktop.NetworkManager.CertificateAgent"
+#define CERT_AGENT_OBJECT_PATH   "/org/freedesktop/NetworkManager/CertificateAgent"
+#define CERT_AGENT_IFACE         "org.freedesktop.NetworkManager.CertificateAgent"
 #define NM_CERT_AGENT_TIMEOUT_MS 180000
 
 /*****************************************************************************/
 
-#define _NMLOG_DOMAIN LOGD_TOFU
-#define _NMLOG(level, ...) \
-    nm_log((level), (_NMLOG_DOMAIN), NULL, NULL, "tofu: " __VA_ARGS__)
+#define _NMLOG_DOMAIN      LOGD_TOFU
+#define _NMLOG(level, ...) nm_log((level), (_NMLOG_DOMAIN), NULL, NULL, "tofu: " __VA_ARGS__)
 
-#define TOFU_CERT_DIR   NMSTATEDIR "/tofu"
+#define TOFU_CERT_DIR NMSTATEDIR "/tofu"
 
 /*****************************************************************************/
 /* Session state (module-global; one NM process, one active session)          */
@@ -170,12 +169,12 @@ nm_tofu_reset_session(void)
 static GPtrArray *
 extract_san_dnsnames(GBytes *cert_data)
 {
-    gnutls_x509_crt_t  crt;
-    gnutls_datum_t     datum;
-    GPtrArray         *names;
-    unsigned int       idx = 0;
-    char               cn_buf[256];
-    size_t             cn_len = sizeof(cn_buf);
+    gnutls_x509_crt_t crt;
+    gnutls_datum_t    datum;
+    GPtrArray        *names;
+    unsigned          idx = 0;
+    char              cn_buf[256];
+    size_t            cn_len = sizeof(cn_buf);
 
     names = g_ptr_array_new_with_free_func(g_free);
 
@@ -203,22 +202,22 @@ extract_san_dnsnames(GBytes *cert_data)
      * the _2 variant, which is the one that actually reports @san_type —
      * the plain variant's 5th parameter is @critical, not @san_type. */
     for (;;) {
-        size_t         san_len = 0;
-        unsigned int   san_type, critical;
-        gs_free char  *san_buf = NULL;
-        int            rc;
+        size_t        san_len = 0;
+        unsigned      san_type, critical;
+        gs_free char *san_buf = NULL;
+        int           rc;
 
         rc = gnutls_x509_crt_get_subject_alt_name2(crt, idx, NULL, &san_len, &san_type, &critical);
         if (rc != GNUTLS_E_SHORT_MEMORY_BUFFER)
             break;
 
         san_buf = g_malloc(san_len);
-        rc = gnutls_x509_crt_get_subject_alt_name2(crt,
-                                                    idx,
-                                                    san_buf,
-                                                    &san_len,
-                                                    &san_type,
-                                                    &critical);
+        rc      = gnutls_x509_crt_get_subject_alt_name2(crt,
+                                                        idx,
+                                                        san_buf,
+                                                        &san_len,
+                                                        &san_type,
+                                                        &critical);
         if (rc < 0)
             break;
 
@@ -234,12 +233,7 @@ extract_san_dnsnames(GBytes *cert_data)
 
     if (names->len == 0) {
         /* Fall back to Common Name. */
-        if (gnutls_x509_crt_get_dn_by_oid(crt,
-                                            GNUTLS_OID_X520_COMMON_NAME,
-                                            0,
-                                            0,
-                                            cn_buf,
-                                            &cn_len)
+        if (gnutls_x509_crt_get_dn_by_oid(crt, GNUTLS_OID_X520_COMMON_NAME, 0, 0, cn_buf, &cn_len)
             >= 0)
             g_ptr_array_add(names, g_strdup(cn_buf));
     }
@@ -250,9 +244,9 @@ extract_san_dnsnames(GBytes *cert_data)
 
 /* Forward declaration — defined in the connection management section below. */
 static void tofu_deauthenticate_connection_by_uuid(const char *uuid_target);
-static void tofu_set_autoconnect_for_uuid(const char                      *uuid_target,
-                                          gboolean                         enable,
-                                          NMSettingsConnectionPersistMode  persist_mode);
+static void tofu_set_autoconnect_for_uuid(const char                     *uuid_target,
+                                          gboolean                        enable,
+                                          NMSettingsConnectionPersistMode persist_mode);
 
 /* Forward declaration — defined in the Stage 3 section below, called from
  * the CertificateAgent dispatch section above it. */
@@ -292,16 +286,16 @@ tofu_resolve_self_signed_root(NMTOFUCertSession *observed_session, gboolean *out
     g_return_val_if_fail(observed_session && observed_session->certs, NULL);
 
     for (i = 0; i < observed_session->certs->len; i++) {
-        NMTOFUCertInfo    *info = g_ptr_array_index(observed_session->certs, i);
-        gnutls_x509_crt_t  crt;
-        gnutls_datum_t     datum;
-        gboolean           self_signed = FALSE;
+        NMTOFUCertInfo   *info = g_ptr_array_index(observed_session->certs, i);
+        gnutls_x509_crt_t crt;
+        gnutls_datum_t    datum;
+        gboolean          self_signed = FALSE;
 
         if (!info || info->depth == 0 || !info->cert_data)
             continue;
 
         datum.data = (unsigned char *) g_bytes_get_data(info->cert_data, NULL);
-        datum.size = (unsigned int) g_bytes_get_size(info->cert_data);
+        datum.size = (unsigned) g_bytes_get_size(info->cert_data);
 
         gnutls_x509_crt_init(&crt);
         if (gnutls_x509_crt_import(crt, &datum, GNUTLS_X509_FMT_DER) == GNUTLS_E_SUCCESS) {
@@ -383,10 +377,10 @@ tofu_resolve_self_signed_root(NMTOFUCertSession *observed_session, gboolean *out
         gnutls_x509_crt_t        top_crt;
         gnutls_datum_t           top_datum;
         gnutls_x509_trust_list_t trust_list = NULL;
-        GBytes                  *result = NULL;
+        GBytes                  *result     = NULL;
 
         top_datum.data = (unsigned char *) g_bytes_get_data(top->cert_data, NULL);
-        top_datum.size = (unsigned int) g_bytes_get_size(top->cert_data);
+        top_datum.size = (unsigned) g_bytes_get_size(top->cert_data);
 
         gnutls_x509_crt_init(&top_crt);
         if (gnutls_x509_crt_import(top_crt, &top_datum, GNUTLS_X509_FMT_DER) == GNUTLS_E_SUCCESS) {
@@ -400,9 +394,9 @@ tofu_resolve_self_signed_root(NMTOFUCertSession *observed_session, gboolean *out
                     int               rc;
 
                     rc = gnutls_x509_trust_list_get_issuer(trust_list,
-                                                            current,
-                                                            &issuer,
-                                                            GNUTLS_TL_GET_COPY);
+                                                           current,
+                                                           &issuer,
+                                                           GNUTLS_TL_GET_COPY);
                     if (rc != GNUTLS_E_SUCCESS || !issuer)
                         break;
 
@@ -455,7 +449,7 @@ tofu_write_root_pem(GBytes *root_der, GError **error)
     gnutls_datum_t    datum, pem_datum = {};
 
     datum.data = (unsigned char *) g_bytes_get_data(root_der, NULL);
-    datum.size = (unsigned int) g_bytes_get_size(root_der);
+    datum.size = (unsigned) g_bytes_get_size(root_der);
 
     gnutls_x509_crt_init(&crt);
     if (gnutls_x509_crt_import(crt, &datum, GNUTLS_X509_FMT_DER) != GNUTLS_E_SUCCESS
@@ -514,9 +508,9 @@ tofu_deauthenticate_connection_by_uuid(const char *uuid_target)
 }
 
 static void
-tofu_set_autoconnect_for_uuid(const char                      *uuid_target,
-                               gboolean                         enable,
-                               NMSettingsConnectionPersistMode  persist_mode)
+tofu_set_autoconnect_for_uuid(const char                     *uuid_target,
+                              gboolean                        enable,
+                              NMSettingsConnectionPersistMode persist_mode)
 {
     NMSettingsConnection *sconn;
     NMConnection         *clone;
@@ -579,7 +573,7 @@ tofu_authenticate_connection_by_uuid(const char *uuid_target)
     NMManager                     *manager;
     NMSettingsConnection          *sconn;
     NMConnection                  *conn;
-    NMDevice                      *device = NULL;
+    NMDevice                      *device  = NULL;
     NMActiveConnection            *active  = NULL;
     gs_free_error GError          *error   = NULL;
     gs_unref_object NMAuthSubject *subject = NULL;
@@ -615,7 +609,7 @@ tofu_authenticate_connection_by_uuid(const char *uuid_target)
         NMDevice    *dev_iter;
         const CList *tmp_list;
 
-        nm_manager_for_each_device(manager, dev_iter, tmp_list) {
+        nm_manager_for_each_device (manager, dev_iter, tmp_list) {
             if (nm_device_get_device_type(dev_iter) == NM_DEVICE_TYPE_WIFI) {
                 device = dev_iter;
                 break;
@@ -695,13 +689,13 @@ tofu_add_timestamp_to_connection(const char *uuid)
  * CA-hash/pin + domain match, see GitLab NetworkManager#1999).
  */
 static gboolean
-tofu_update_ca_cert(const char                      *uuid,
-                    GBytes                          *root_der,
-                    const char                      *domain,
-                    NMSettingsConnectionPersistMode  persist_mode)
+tofu_update_ca_cert(const char                     *uuid,
+                    GBytes                         *root_der,
+                    const char                     *domain,
+                    NMSettingsConnectionPersistMode persist_mode)
 {
     gs_free char         *pem_path = NULL;
-    gs_free_error GError *error = NULL;
+    gs_free_error GError *error    = NULL;
     NMSettingsConnection *sconn;
     NMConnection         *clone;
     NMSetting8021x       *s_8021x;
@@ -733,10 +727,10 @@ tofu_update_ca_cert(const char                      *uuid,
     }
 
     if (!nm_setting_802_1x_set_ca_cert(s_8021x,
-                                        pem_path,
-                                        NM_SETTING_802_1X_CK_SCHEME_PATH,
-                                        NULL,
-                                        &upd_err)) {
+                                       pem_path,
+                                       NM_SETTING_802_1X_CK_SCHEME_PATH,
+                                       NULL,
+                                       &upd_err)) {
         _NMLOG(LOGL_WARN,
                "update-ca-cert: set_ca_cert failed for uuid=%s: %s",
                uuid,
@@ -780,10 +774,10 @@ tofu_update_ca_cert(const char                      *uuid,
  * tofu_update_ca_cert()'s behavior; cheap, harmless either way.
  */
 static void
-tofu_update_ca_cert_hash(const char                      *uuid,
-                         const char                      *hash_hex,
-                         const char                      *domain,
-                         NMSettingsConnectionPersistMode  persist_mode)
+tofu_update_ca_cert_hash(const char                     *uuid,
+                         const char                     *hash_hex,
+                         const char                     *domain,
+                         NMSettingsConnectionPersistMode persist_mode)
 {
     gs_free char         *hash_uri = NULL;
     NMSettingsConnection *sconn;
@@ -813,10 +807,10 @@ tofu_update_ca_cert_hash(const char                      *uuid,
     }
 
     if (!nm_setting_802_1x_set_ca_cert(s_8021x,
-                                        hash_uri,
-                                        NM_SETTING_802_1X_CK_SCHEME_SERVER_HASH,
-                                        NULL,
-                                        &upd_err)) {
+                                       hash_uri,
+                                       NM_SETTING_802_1X_CK_SCHEME_SERVER_HASH,
+                                       NULL,
+                                       &upd_err)) {
         _NMLOG(LOGL_WARN,
                "update-ca-cert-hash: set_ca_cert failed for uuid=%s: %s",
                uuid,
@@ -911,15 +905,15 @@ cert_req_cb(GObject *src, GAsyncResult *res, gpointer user_data)
 
 static void
 tofu_certificate_agent_call_request(GDBusConnection *conn,
-                                    NMConnection     *connection,
-                                    const char       *ssid,
-                                    const char       *cn,
-                                    const char       *issuer,
-                                    const char       *org,
-                                    const char       *sha256,
-                                    const char       *exp,
-                                    const char       *disclaimer,
-                                    const char       *url)
+                                    NMConnection    *connection,
+                                    const char      *ssid,
+                                    const char      *cn,
+                                    const char      *issuer,
+                                    const char      *org,
+                                    const char      *sha256,
+                                    const char      *exp,
+                                    const char      *disclaimer,
+                                    const char      *url)
 {
     CertCallCtx  *ctx;
     gs_free char *dest = NULL;
@@ -935,18 +929,19 @@ tofu_certificate_agent_call_request(GDBusConnection *conn,
     ctx       = g_new0(CertCallCtx, 1);
     ctx->ssid = g_strdup(ssid);
 
-    g_dbus_connection_call(conn,
-                           dest,
-                           CERT_AGENT_OBJECT_PATH,
-                           CERT_AGENT_IFACE,
-                           "CertificateVerificationRequest",
-                           g_variant_new("(ssssssss)", ssid, cn, issuer, org, sha256, exp, disclaimer, url),
-                           G_VARIANT_TYPE("(b)"),
-                           G_DBUS_CALL_FLAGS_NONE,
-                           NM_CERT_AGENT_TIMEOUT_MS,
-                           NULL,
-                           cert_req_cb,
-                           ctx);
+    g_dbus_connection_call(
+        conn,
+        dest,
+        CERT_AGENT_OBJECT_PATH,
+        CERT_AGENT_IFACE,
+        "CertificateVerificationRequest",
+        g_variant_new("(ssssssss)", ssid, cn, issuer, org, sha256, exp, disclaimer, url),
+        G_VARIANT_TYPE("(b)"),
+        G_DBUS_CALL_FLAGS_NONE,
+        NM_CERT_AGENT_TIMEOUT_MS,
+        NULL,
+        cert_req_cb,
+        ctx);
 }
 
 /*****************************************************************************/
@@ -960,9 +955,9 @@ tofu_certificate_agent_call_request(GDBusConnection *conn,
 typedef struct {
     char          *uuid;
     char          *domain;
-    char          *leaf_hash; /* NULL if no leaf observed */
+    char          *leaf_hash;     /* NULL if no leaf observed */
     GBytes        *resolved_root; /* ref'd snapshot of s_resolved_root, or NULL */
-    NMAuthSubject *subject; /* ref'd snapshot of s_subject, or NULL */
+    NMAuthSubject *subject;       /* ref'd snapshot of s_subject, or NULL */
 } TofuAcceptCtx;
 
 static void
@@ -1019,10 +1014,10 @@ tofu_accept_ctx_free(TofuAcceptCtx *ctx)
 static void
 tofu_revert_temporary_cert(const char *uuid)
 {
-    NMSettingsConnection          *sconn;
+    NMSettingsConnection         *sconn;
     gs_unref_object NMConnection *clone = NULL;
-    NMSetting8021x                *s_8021x;
-    gs_free_error GError          *error = NULL;
+    NMSetting8021x               *s_8021x;
+    gs_free_error GError         *error = NULL;
 
     sconn = nm_settings_get_connection_by_uuid(nm_settings_get(), uuid);
     if (!sconn)
@@ -1057,7 +1052,9 @@ tofu_revert_temporary_cert(const char *uuid)
      * the not-authorized path (set via tofu_set_autoconnect_for_uuid()
      * with IN_MEMORY_DETACHED in tofu_accept_persist()) — put it back to
      * FALSE in-memory too, same lifecycle as the cert above. */
-    tofu_set_autoconnect_for_uuid(uuid, FALSE, NM_SETTINGS_CONNECTION_PERSIST_MODE_IN_MEMORY_DETACHED);
+    tofu_set_autoconnect_for_uuid(uuid,
+                                  FALSE,
+                                  NM_SETTINGS_CONNECTION_PERSIST_MODE_IN_MEMORY_DETACHED);
 }
 
 /*
@@ -1094,9 +1091,9 @@ tofu_accept_persist(TofuAcceptCtx *ctx, gboolean authorized)
             _NMLOG(LOGL_INFO, "agent response: pinned root CA for uuid=%s (persisted)", ctx->uuid);
         } else if (ctx->leaf_hash) {
             tofu_update_ca_cert_hash(ctx->uuid,
-                                    ctx->leaf_hash,
-                                    ctx->domain,
-                                    NM_SETTINGS_CONNECTION_PERSIST_MODE_TO_DISK);
+                                     ctx->leaf_hash,
+                                     ctx->domain,
+                                     NM_SETTINGS_CONNECTION_PERSIST_MODE_TO_DISK);
             _NMLOG(LOGL_INFO,
                    "agent response: pinned leaf hash for uuid=%s (persisted)",
                    ctx->uuid);
@@ -1126,8 +1123,9 @@ tofu_accept_persist(TofuAcceptCtx *ctx, gboolean authorized)
 
     tofu_set_autoconnect_for_uuid(ctx->uuid,
                                   TRUE,
-                                  authorized ? NM_SETTINGS_CONNECTION_PERSIST_MODE_TO_DISK
-                                             : NM_SETTINGS_CONNECTION_PERSIST_MODE_IN_MEMORY_DETACHED);
+                                  authorized
+                                      ? NM_SETTINGS_CONNECTION_PERSIST_MODE_TO_DISK
+                                      : NM_SETTINGS_CONNECTION_PERSIST_MODE_IN_MEMORY_DETACHED);
     tofu_add_timestamp_to_connection(ctx->uuid);
 
     if (temp_pin_applied) {
@@ -1172,8 +1170,8 @@ static void
 tofu_polkit_check_cb(NMAuthChain *chain, GDBusMethodInvocation *context, gpointer user_data)
 {
     TofuPolkitDoneFunc done_func = nm_auth_chain_get_data(chain, "done_func");
-    const char         *perm     = nm_auth_chain_get_data(chain, "perm");
-    gboolean            authorized;
+    const char        *perm      = nm_auth_chain_get_data(chain, "perm");
+    gboolean           authorized;
 
     authorized = perm && nm_auth_chain_get_result(chain, perm) == NM_AUTH_CALL_RESULT_YES;
 
@@ -1183,14 +1181,14 @@ tofu_polkit_check_cb(NMAuthChain *chain, GDBusMethodInvocation *context, gpointe
 }
 
 static gboolean
-tofu_polkit_check_modify(NMConnection       *connection,
-                         NMAuthSubject      *subject,
-                         TofuPolkitDoneFunc  done_func,
-                         gpointer            user_data)
+tofu_polkit_check_modify(NMConnection      *connection,
+                         NMAuthSubject     *subject,
+                         TofuPolkitDoneFunc done_func,
+                         gpointer           user_data)
 {
     NMSettingConnection *s_con;
     const char          *perm;
-    NMAuthChain          *chain;
+    NMAuthChain         *chain;
 
     if (!connection || !subject
         || nm_auth_subject_get_subject_type(subject) != NM_AUTH_SUBJECT_TYPE_UNIX_PROCESS)
@@ -1198,8 +1196,8 @@ tofu_polkit_check_modify(NMConnection       *connection,
 
     s_con = nm_connection_get_setting_connection(connection);
     perm  = (s_con && nm_setting_connection_get_num_permissions(s_con) == 1)
-              ? NM_AUTH_PERMISSION_SETTINGS_MODIFY_OWN
-              : NM_AUTH_PERMISSION_SETTINGS_MODIFY_SYSTEM;
+                ? NM_AUTH_PERMISSION_SETTINGS_MODIFY_OWN
+                : NM_AUTH_PERMISSION_SETTINGS_MODIFY_SYSTEM;
 
     chain = nm_auth_chain_new_subject(subject, NULL, tofu_polkit_check_cb, NULL);
     nm_auth_chain_set_data(chain, "perm", (gpointer) perm, NULL);
@@ -1322,7 +1320,7 @@ tofu_on_agent_response(gboolean response, const char *ssid, gpointer user_data)
         if (!tofu_polkit_check_modify(connection, ctx->subject, tofu_accept_polkit_done, ctx))
             tofu_accept_persist(ctx, FALSE);
     } else {
-        TofuRejectCtx                 *rctx       = g_new0(TofuRejectCtx, 1);
+        TofuRejectCtx                 *rctx = g_new0(TofuRejectCtx, 1);
         NMSettingsConnection          *sconn;
         NMConnection                  *connection;
         gs_unref_object NMAuthSubject *snap_subject = s_subject ? g_object_ref(s_subject) : NULL;
@@ -1354,27 +1352,27 @@ tofu_on_agent_response(gboolean response, const char *ssid, gpointer user_data)
 static void
 tofu_parse_and_dispatch(const char *disclaimer)
 {
-    NMTOFUCertInfo    *leaf_cert        = NULL;
-    GBytes            *display_cert_data = NULL;
-    gnutls_x509_crt_t  crt;
-    gnutls_datum_t     datum;
-    char               cn[256]        = {0};
-    char               issuer[256]    = {0};
-    char               org[256]       = {0};
-    char               sha256_hex[65] = {0};
-    char               exp_str[128]   = {0};
-    size_t             field_len;
-    unsigned char      sha256_raw[32];
-    size_t             sha256_len = sizeof(sha256_raw);
-    time_t             exp_time;
-    struct tm         *tm_info;
-    GPtrArray         *san_names = NULL;
-    const char        *best_url  = "N/A";
-    NMDBusManager     *dbus_mgr;
-    GDBusConnection   *dbus_conn;
+    NMTOFUCertInfo       *leaf_cert         = NULL;
+    GBytes               *display_cert_data = NULL;
+    gnutls_x509_crt_t     crt;
+    gnutls_datum_t        datum;
+    char                  cn[256]        = {0};
+    char                  issuer[256]    = {0};
+    char                  org[256]       = {0};
+    char                  sha256_hex[65] = {0};
+    char                  exp_str[128]   = {0};
+    size_t                field_len;
+    unsigned char         sha256_raw[32];
+    size_t                sha256_len = sizeof(sha256_raw);
+    time_t                exp_time;
+    struct tm            *tm_info;
+    GPtrArray            *san_names = NULL;
+    const char           *best_url  = "N/A";
+    NMDBusManager        *dbus_mgr;
+    GDBusConnection      *dbus_conn;
     NMSettingsConnection *sconn;
-    NMConnection      *connection;
-    guint              i;
+    NMConnection         *connection;
+    guint                 i;
 
     if (!s_observed_certs || s_observed_certs->certs->len == 0) {
         _NMLOG(LOGL_WARN, "no certs to dispatch for SSID=%s", s_ssid);
@@ -1388,10 +1386,7 @@ tofu_parse_and_dispatch(const char *disclaimer)
     }
     connection = nm_settings_connection_get_connection(sconn);
 
-    _NMLOG(LOGL_INFO,
-           "dispatching %u cert(s) for SSID=%s",
-           s_observed_certs->certs->len,
-           s_ssid);
+    _NMLOG(LOGL_INFO, "dispatching %u cert(s) for SSID=%s", s_observed_certs->certs->len, s_ssid);
 
     /* The server's own leaf cert (depth==0) is what the user needs to
      * verify — not array index 0. wpa_supplicant's Certification signal
@@ -1432,19 +1427,14 @@ tofu_parse_and_dispatch(const char *disclaimer)
 
     field_len = sizeof(issuer);
     gnutls_x509_crt_get_issuer_dn_by_oid(crt,
-                                          GNUTLS_OID_X520_COMMON_NAME,
-                                          0,
-                                          0,
-                                          issuer,
-                                          &field_len);
+                                         GNUTLS_OID_X520_COMMON_NAME,
+                                         0,
+                                         0,
+                                         issuer,
+                                         &field_len);
 
     field_len = sizeof(org);
-    gnutls_x509_crt_get_dn_by_oid(crt,
-                                   GNUTLS_OID_X520_ORGANIZATION_NAME,
-                                   0,
-                                   0,
-                                   org,
-                                   &field_len);
+    gnutls_x509_crt_get_dn_by_oid(crt, GNUTLS_OID_X520_ORGANIZATION_NAME, 0, 0, org, &field_len);
 
     gnutls_x509_crt_get_fingerprint(crt, GNUTLS_DIG_SHA256, sha256_raw, &sha256_len);
     for (i = 0; i < sha256_len; i++)
@@ -1539,8 +1529,8 @@ tofu_stage3(void)
 void
 nm_tofu_stage2_cert_signal(GVariant *parameters)
 {
-    gs_unref_variant GVariant *dict      = NULL;
-    GVariantIter              *iter      = NULL;
+    gs_unref_variant GVariant *dict = NULL;
+    GVariantIter              *iter = NULL;
     const char                *key;
     GVariant                  *value;
     const char                *subject   = NULL;

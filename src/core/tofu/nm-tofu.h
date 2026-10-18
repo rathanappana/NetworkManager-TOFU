@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0-or-later */
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
 /*
  * Copyright (C) 2025 Red Hat, Inc.
  */
@@ -44,7 +44,7 @@ typedef enum {
 typedef struct {
     guint   depth;
     char   *subject;
-    char   *hash;    /* hex SHA-256 as reported by wpa_supplicant */
+    char   *hash;      /* hex SHA-256 as reported by wpa_supplicant */
     GBytes *cert_data; /* raw DER bytes */
 } NMTOFUCertInfo;
 
@@ -53,7 +53,7 @@ typedef struct {
  * finalized is set TRUE once the leaf (depth==0) cert has arrived.
  */
 typedef struct {
-    GPtrArray *certs;     /* element type: NMTOFUCertInfo* */
+    GPtrArray *certs; /* element type: NMTOFUCertInfo* */
     gboolean   finalized;
 } NMTOFUCertSession;
 
