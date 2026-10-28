@@ -5765,6 +5765,49 @@ test_setting_802_1x_changed_signal(void)
 }
 
 static void
+test_setting_802_1x_ca_verify_mode(void)
+{
+    gs_unref_object NMSetting8021x *s_8021x = NULL;
+
+    s_8021x = (NMSetting8021x *) nm_setting_802_1x_new();
+    nm_setting_802_1x_add_eap_method(s_8021x, "ttls");
+    g_object_set(s_8021x, NM_SETTING_802_1X_IDENTITY, "bob", NULL);
+    g_object_set(s_8021x, NM_SETTING_802_1X_PHASE2_AUTH, "pap", NULL);
+
+    /* unset: defaults to "default", verifies fine */
+    g_assert_cmpint(nm_setting_802_1x_get_ca_verify_mode(s_8021x),
+                    ==,
+                    NM_SETTING_802_1X_CA_VERIFY_MODE_DEFAULT);
+    nmtst_assert_setting_verifies(NM_SETTING(s_8021x));
+
+    /* explicitly set to "tofu" */
+    g_object_set(s_8021x,
+                NM_SETTING_802_1X_CA_VERIFY_MODE,
+                NM_SETTING_802_1X_CA_VERIFY_MODE_TOFU,
+                NULL);
+    g_assert_cmpint(nm_setting_802_1x_get_ca_verify_mode(s_8021x),
+                    ==,
+                    NM_SETTING_802_1X_CA_VERIFY_MODE_TOFU);
+    nmtst_assert_setting_verifies(NM_SETTING(s_8021x));
+
+    /* back to "default" */
+    g_object_set(s_8021x,
+                NM_SETTING_802_1X_CA_VERIFY_MODE,
+                NM_SETTING_802_1X_CA_VERIFY_MODE_DEFAULT,
+                NULL);
+    g_assert_cmpint(nm_setting_802_1x_get_ca_verify_mode(s_8021x),
+                    ==,
+                    NM_SETTING_802_1X_CA_VERIFY_MODE_DEFAULT);
+    nmtst_assert_setting_verifies(NM_SETTING(s_8021x));
+
+    /* out-of-range enum value: rejected */
+    g_object_set(s_8021x, NM_SETTING_802_1X_CA_VERIFY_MODE, 99, NULL);
+    nmtst_assert_setting_verify_fails(NM_SETTING(s_8021x),
+                                      NM_CONNECTION_ERROR,
+                                      NM_CONNECTION_ERROR_INVALID_PROPERTY);
+}
+
+static void
 test_setting_old_uuid(void)
 {
     gs_unref_object NMSetting *setting = NULL;
@@ -12333,6 +12376,8 @@ main(int argc, char **argv)
                     test_setting_wireless_security_changed_signal);
     g_test_add_func("/core/general/test_setting_802_1x_changed_signal",
                     test_setting_802_1x_changed_signal);
+    g_test_add_func("/core/general/test_setting_802_1x_ca_verify_mode",
+                    test_setting_802_1x_ca_verify_mode);
     g_test_add_func("/core/general/test_setting_ip4_gateway", test_setting_ip4_gateway);
     g_test_add_func("/core/general/test_setting_ip6_gateway", test_setting_ip6_gateway);
     g_test_add_func("/core/general/test_setting_compare_default_strv",
