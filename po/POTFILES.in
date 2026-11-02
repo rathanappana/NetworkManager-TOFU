@@ -35,6 +35,7 @@ src/core/main.c
 src/core/nm-config.c
 src/core/nm-manager.c
 src/core/tofu/nm-tofu.c
+src/core/tofu/nm-tofu-connection.c
 src/libnm-client-impl/nm-client.c
 src/libnm-client-impl/nm-conn-utils.c
 src/libnm-client-impl/nm-device-6lowpan.c

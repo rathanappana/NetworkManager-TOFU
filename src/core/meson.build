@@ -158,6 +158,7 @@ libNetworkManager = static_library(
     'vpn/nm-vpn-connection.c',
     'vpn/nm-vpn-manager.c',
     'tofu/nm-tofu.c',
+    'tofu/nm-tofu-connection.c',
     'nm-active-connection.c',
     'nm-act-request.c',
     'nm-audit-manager.c',
