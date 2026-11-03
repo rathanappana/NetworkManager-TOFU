@@ -471,6 +471,10 @@
                   dbus-type="b"
                   gprop-type="gboolean"
                   />
+        <property name="tofu"
+                  dbus-type="b"
+                  gprop-type="gboolean"
+                  />
     </setting>
     <setting name="802-3-ethernet"
              gtype="NMSettingWired"

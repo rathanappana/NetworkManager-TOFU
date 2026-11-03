@@ -94,6 +94,7 @@ NM_GOBJECT_PROPERTIES_DEFINE(NMSetting8021x,
                              PROP_CA_CERT_PASSWORD_FLAGS,
                              PROP_CA_PATH,
                              PROP_SERVER_CERT_HASH,
+                             PROP_TOFU,
                              PROP_SUBJECT_MATCH,
                              PROP_ALTSUBJECT_MATCHES,
                              PROP_DOMAIN_SUFFIX_MATCH,
@@ -185,6 +186,7 @@ typedef struct {
     gint32  auth_timeout;
     bool    optional;
     bool    system_ca_certs;
+    bool    tofu;
 } NMSetting8021xPrivate;
 
 /**
@@ -945,6 +947,22 @@ nm_setting_802_1x_get_server_cert_hash(NMSetting8021x *setting)
     g_return_val_if_fail(NM_IS_SETTING_802_1X(setting), NULL);
 
     return NM_SETTING_802_1X_GET_PRIVATE(setting)->server_cert_hash;
+}
+
+/**
+ * nm_setting_802_1x_get_tofu:
+ * @setting: the #NMSetting8021x
+ *
+ * Returns: the #NMSetting8021x:tofu property
+ *
+ * Since: 1.60
+ **/
+gboolean
+nm_setting_802_1x_get_tofu(NMSetting8021x *setting)
+{
+    g_return_val_if_fail(NM_IS_SETTING_802_1X(setting), FALSE);
+
+    return NM_SETTING_802_1X_GET_PRIVATE(setting)->tofu;
 }
 
 /**
@@ -3595,6 +3613,27 @@ nm_setting_802_1x_class_init(NMSetting8021xClass *klass)
                                               .direct_data.set_string =
                                                   _set_string_fcn_server_cert_hash,
                                               .direct_string_allow_empty = TRUE);
+
+    /**
+     * NMSetting8021x:tofu:
+     *
+     * Enables Trust On First Use (TOFU) for this connection. When %TRUE and
+     * no #NMSetting8021x:ca-cert, #NMSetting8021x:ca-path or
+     * #NMSetting8021x:system-ca-certs is configured, the authentication
+     * server's certificate is prompted to user for verification on first
+     * connection and if trusted, then pinned to the certificate accordingly.
+     * When %FALSE, TOFU is disabled.
+     *
+     * Since: 1.60
+     **/
+    _nm_setting_property_define_direct_boolean(properties_override,
+                                               obj_properties,
+                                               NM_SETTING_802_1X_TOFU,
+                                               PROP_TOFU,
+                                               FALSE,
+                                               NM_SETTING_PARAM_NONE,
+                                               NMSetting8021xPrivate,
+                                               tofu);
 
     /**
      * NMSetting8021x:subject-match:
