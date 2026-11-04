@@ -3315,11 +3315,12 @@ _signal_handle(NMSupplicantInterface *self,
         if (nm_streq(signal_name, "Certification")) {
             if (!g_variant_is_of_type(parameters, G_VARIANT_TYPE("(a{sv})")))
                 return;
-            if (nm_tofu_get_session_type() == NM_TOFU_SESSION_TYPE_DEFAULT) {
+            if (nm_tofu_session_get_session_type(nm_tofu_session_get())
+                == NM_TOFU_SESSION_TYPE_DEFAULT) {
                 _NMLOG(LOGL_DEBUG, "Certification signal ignored — no active TOFU session");
                 return;
             }
-            nm_tofu_stage2_cert_signal(parameters);
+            nm_tofu_stage2_cert_signal(nm_tofu_session_get(), parameters);
             return;
         }
 
