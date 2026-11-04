@@ -65,6 +65,21 @@ NMTOFUSessionType nm_tofu_session_get_session_type(NMToFuSession *self);
 const char       *nm_tofu_session_get_ssid(NMToFuSession *self);
 const char       *nm_tofu_session_get_uuid(NMToFuSession *self);
 void              nm_tofu_session_reset(NMToFuSession *self);
+char      *nm_tofu_session_write_root_pem(NMToFuSession *self, GBytes *root_der, GError **error);
+void       tofu_deauthenticate_connection_by_uuid(const char *uuid_target);
+GPtrArray *nm_tofu_extract_san_dnsnames(GBytes *cert_data);
+gboolean   nm_tofu_session_get_display_fields(NMToFuSession *self,
+                                              char         **out_cn,
+                                              char         **out_issuer,
+                                              char         **out_org,
+                                              char         **out_sha256,
+                                              char         **out_exp,
+                                              char         **out_url);
+void       nm_tofu_session_get_pin_data(NMToFuSession *self,
+                                        GBytes       **out_root_der,
+                                        const char   **out_leaf_hash,
+                                        const char   **out_domain);
+gboolean   nm_tofu_session_get_via_system_trust(NMToFuSession *self);
 
 /*****************************************************************************/
 /* Stage 2: Cert Collection from wpa_supplicant Certification Signal          */
