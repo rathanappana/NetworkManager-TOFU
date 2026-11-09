@@ -486,8 +486,8 @@ _cert_get_path(GBytes *bytes)
                              NULL);                                              \
                                                                                  \
         return g_bytes_get_data(_cert, NULL);                                    \
-    }
-G_STMT_END
+    }                                                                            \
+    G_STMT_END
 
 static gboolean
 _cert_impl_set(NMSetting8021x         *setting,
