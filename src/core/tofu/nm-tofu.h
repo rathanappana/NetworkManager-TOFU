@@ -66,7 +66,6 @@ const char       *nm_tofu_session_get_ssid(NMToFuSession *self);
 const char       *nm_tofu_session_get_uuid(NMToFuSession *self);
 void              nm_tofu_session_reset(NMToFuSession *self);
 char      *nm_tofu_session_write_root_pem(NMToFuSession *self, GBytes *root_der, GError **error);
-void       tofu_deauthenticate_connection_by_uuid(const char *uuid_target);
 GPtrArray *nm_tofu_extract_san_dnsnames(GBytes *cert_data);
 gboolean   nm_tofu_session_get_display_fields(NMToFuSession *self,
                                               char         **out_cn,

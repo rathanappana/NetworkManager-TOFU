@@ -199,6 +199,38 @@ tofu_update_ca_cert(NMToFuSession                  *session,
 }
 
 static void
+tofu_deauthenticate_connection_by_uuid(const char *uuid_target)
+{
+    NMManager            *manager = nm_manager_get();
+    NMSettingsConnection *sconn;
+    NMActiveConnection   *ac;
+    const CList          *tmp_list;
+
+    if (!manager || !uuid_target)
+        return;
+
+    sconn = nm_settings_get_connection_by_uuid(nm_settings_get(), uuid_target);
+    if (!sconn)
+        return;
+
+    nm_manager_for_each_active_connection (manager, ac, tmp_list) {
+        gs_free_error GError *error = NULL;
+
+        if (nm_active_connection_get_settings_connection(ac) != sconn)
+            continue;
+
+        _NMLOG(LOGL_INFO, "deauthenticating uuid=%s", uuid_target);
+        if (!nm_manager_deactivate_connection(manager,
+                                              ac,
+                                              NM_DEVICE_STATE_REASON_USER_REQUESTED,
+                                              &error)) {
+            _NMLOG(LOGL_WARN, "deactivate uuid=%s failed: %s", uuid_target, error->message);
+        }
+        return;
+    }
+}
+
+static void
 tofu_remove_connection(const char *uuid)
 {
     NMSettingsConnection *sconn = nm_settings_get_connection_by_uuid(nm_settings_get(), uuid);
