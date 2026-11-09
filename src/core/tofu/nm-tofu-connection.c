@@ -741,14 +741,6 @@ nm_tofu_connection_setup(NMConnection         *connection,
 
     g_task_set_task_data(task, ctx, (GDestroyNotify) tofu_connection_ctx_free);
 
-    /* Hook up the cancellation listener */
-    ctx->ac_state_id = g_signal_connect(req,
-                                        "notify::" NM_ACTIVE_CONNECTION_STATE,
-                                        G_CALLBACK(tofu_ac_state_changed_cb),
-                                        cancellable);
-
-    g_task_set_task_data(task, ctx, (GDestroyNotify) tofu_connection_ctx_free);
-
     ctx->stage3_id = g_signal_connect(nm_tofu_session_get(),
                                       "stage3-ready",
                                       G_CALLBACK(tofu_on_stage3_ready),
