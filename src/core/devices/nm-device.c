@@ -666,6 +666,7 @@ typedef struct _NMDevicePrivate {
             NMDeviceIPState state_x[2];
         };
         bool carrier_timeout_expired;
+        bool restart_needed;
     } ipmanual_data;
 
     union {
@@ -11427,6 +11428,8 @@ _dev_ipmanual_cleanup(NMDevice *self)
 {
     NMDevicePrivate *priv = NM_DEVICE_GET_PRIVATE(self);
 
+    priv->ipmanual_data.restart_needed = FALSE;
+
     if (priv->ipmanual_data.state_4 == NM_DEVICE_IP_STATE_NONE
         && priv->ipmanual_data.state_6 == NM_DEVICE_IP_STATE_NONE) {
         nm_assert(!priv->l3cds[L3_CONFIG_DATA_TYPE_MANUALIP].d);
@@ -11536,6 +11539,11 @@ _dev_ipmanual_start(NMDevice *self)
 {
     NMDevicePrivate                        *priv = NM_DEVICE_GET_PRIVATE(self);
     nm_auto_unref_l3cd_init NML3ConfigData *l3cd = NULL;
+
+    /* Cleanup and rebuild here, together, so the removal and the
+     * re-add of the manual l3cd commit as one, not two platform syncs. */
+    if (priv->ipmanual_data.restart_needed)
+        _dev_ipmanual_cleanup(self);
 
     if (priv->ipmanual_data.state_4 != NM_DEVICE_IP_STATE_NONE
         || priv->ipmanual_data.state_6 != NM_DEVICE_IP_STATE_NONE)
@@ -14394,6 +14402,28 @@ reactivate_proxy_config(NMDevice *self)
         _pacrunner_manager_add(self);
 }
 
+/* TRUE if @setting_diff only has routing keys; route-only reapplies
+ * must not restart DHCP/autoconf. */
+static gboolean
+_ip_setting_diff_is_routing_only(GHashTable *setting_diff)
+{
+    if (!setting_diff)
+        return FALSE;
+
+    /* route-table is excluded: it needs the full do_reapply path,
+     * since NML3IPv6LL caches the route table at construction. */
+    return nm_device_hash_check_invalid_keys(setting_diff,
+                                             NULL,
+                                             NULL,
+                                             NM_SETTING_IP_CONFIG_GATEWAY,
+                                             NM_SETTING_IP_CONFIG_ROUTES,
+                                             NM_SETTING_IP_CONFIG_ROUTE_METRIC,
+                                             NM_SETTING_IP_CONFIG_IGNORE_AUTO_ROUTES,
+                                             NM_SETTING_IP_CONFIG_NEVER_DEFAULT,
+                                             NM_SETTING_IP_CONFIG_ROUTING_RULES,
+                                             NM_SETTING_IP_CONFIG_REPLACE_LOCAL_RULE);
+}
+
 /*****************************************************************************/
 
 static gboolean
@@ -14457,6 +14487,22 @@ can_reapply_change(NMDevice   *self,
         return nm_device_hash_check_invalid_keys(diffs,
                                                  NM_SETTING_BRIDGE_PORT_SETTING_NAME,
                                                  error,
+                                                 NM_SETTING_BRIDGE_PORT_PRIORITY,
+                                                 NM_SETTING_BRIDGE_PORT_PATH_COST,
+                                                 NM_SETTING_BRIDGE_PORT_BPDU_GUARD,
+                                                 NM_SETTING_BRIDGE_PORT_BROADCAST_FLOOD,
+                                                 NM_SETTING_BRIDGE_PORT_FAST_LEAVE,
+                                                 NM_SETTING_BRIDGE_PORT_HAIRPIN_MODE,
+                                                 NM_SETTING_BRIDGE_PORT_ISOLATED,
+                                                 NM_SETTING_BRIDGE_PORT_LEARNING,
+                                                 NM_SETTING_BRIDGE_PORT_LOCKED,
+                                                 NM_SETTING_BRIDGE_PORT_MULTICAST_FLOOD,
+                                                 NM_SETTING_BRIDGE_PORT_MULTICAST_TO_UNICAST,
+                                                 NM_SETTING_BRIDGE_PORT_NEIGHBOR_SUPPRESS,
+                                                 NM_SETTING_BRIDGE_PORT_NEIGHBOR_VLAN_SUPPRESS,
+                                                 NM_SETTING_BRIDGE_PORT_ROOT_BLOCK,
+                                                 NM_SETTING_BRIDGE_PORT_UNICAST_FLOOD,
+                                                 NM_SETTING_BRIDGE_PORT_VLAN_TUNNEL,
                                                  NM_SETTING_BRIDGE_PORT_VLANS);
     }
 
@@ -14676,10 +14722,27 @@ check_and_reapply_connection(NMDevice            *self,
         /* Allow reapply of MTU */
         priv->mtu_source = NM_DEVICE_MTU_SOURCE_NONE;
 
-        if (nm_g_hash_table_lookup(diffs, NM_SETTING_IP4_CONFIG_SETTING_NAME))
-            priv->ip_data_4.do_reapply = TRUE;
-        if (nm_g_hash_table_lookup(diffs, NM_SETTING_IP6_CONFIG_SETTING_NAME))
-            priv->ip_data_6.do_reapply = TRUE;
+        {
+            GHashTable *ip4_diff =
+                nm_g_hash_table_lookup(diffs, NM_SETTING_IP4_CONFIG_SETTING_NAME);
+            GHashTable *ip6_diff =
+                nm_g_hash_table_lookup(diffs, NM_SETTING_IP6_CONFIG_SETTING_NAME);
+            gboolean ip4_routing_only = _ip_setting_diff_is_routing_only(ip4_diff);
+            gboolean ip6_routing_only = _ip_setting_diff_is_routing_only(ip6_diff);
+
+            /* Routing-only changes skip the DHCP/autoconf restart below. */
+            if (ip4_diff && !ip4_routing_only)
+                priv->ip_data_4.do_reapply = TRUE;
+            if (ip6_diff && !ip6_routing_only)
+                priv->ip_data_6.do_reapply = TRUE;
+
+            /* Without do_reapply, _dev_ipmanual_start() below won't
+             * rebuild the stale manual l3cd. Request that instead of
+             * cleaning up now, to keep removal and rebuild as one commit. */
+            if ((ip4_routing_only || ip6_routing_only) && !priv->ip_data_4.do_reapply
+                && !priv->ip_data_6.do_reapply)
+                priv->ipmanual_data.restart_needed = TRUE;
+        }
 
         if (nm_g_hash_table_contains_any(
                 nm_g_hash_table_lookup(diffs, NM_SETTING_CONNECTION_SETTING_NAME),
@@ -14723,7 +14786,7 @@ check_and_reapply_connection(NMDevice            *self,
     if (priv->state >= NM_DEVICE_STATE_ACTIVATED)
         nm_device_update_metered(self);
 
-    nm_device_reapply_bridge_port_vlans(self);
+    nm_device_reapply_bridge_port_properties(self);
 
     sett_conn = nm_device_get_settings_connection(self);
     if (sett_conn) {

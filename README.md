@@ -101,7 +101,8 @@ See [how to trigger TOFU](#how-to-trigger-and-test-tofu)
 
 ### GUI Integration
 
-For a standard desktop experience, we have modified the `nm-applet` GUI agent. Because graphical applets are maintained outside the core NetworkManager source tree, you must compile and run the modified applet separately to see native desktop TOFU dialogs.
+- Linux kernel >= 5.6 for some ethtool options (pause, eee, ring, link
+  negotiation and speed reporting)
 
 * **Modified NM-Applet (GUI):** [rathanappana/network-manager-applet-tofu](https://github.com/rathanappana/network-manager-applet-tofu)
 

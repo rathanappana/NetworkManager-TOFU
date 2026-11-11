@@ -74,11 +74,11 @@ get_nm_git_bundle() {
         if [ -n "${NM_GIT_BUNDLE+x}" ]; then
             return 0
         fi
-        NM_GIT_BUNDLE='https://download.copr.fedorainfracloud.org/results/networkmanager/NetworkManager-main/fedora-41-x86_64/08367599-nm-git-bundle/nm-git-bundle-20241209-150540.noarch.rpm'
+        NM_GIT_BUNDLE='https://download.copr.fedorainfracloud.org/results/networkmanager/NetworkManager-main/fedora-44-x86_64/11196814-nm-git-bundle/nm-git-bundle-20261023-094245.noarch.rpm'
     fi
     mkdir nm-git-bundle
     pushd nm-git-bundle
-    if ! time curl --fail -o nm-git-bundle.rpm "$NM_GIT_BUNDLE"; then
+    if ! time curl -L --fail -o nm-git-bundle.rpm "$NM_GIT_BUNDLE"; then
         # The bundle is only a fetch speed-up; fall back to the git fetch below.
         echo "nm-git-bundle unavailable at $NM_GIT_BUNDLE, falling back to upstream git fetch" >&2
         popd

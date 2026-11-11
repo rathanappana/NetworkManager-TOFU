@@ -19,6 +19,27 @@ Core:
   choose the CA trust store used to validate the authentication server.
   Such profiles must clear those properties and use "ca-cert" or
   "system-ca-certs" instead.
+* Preserve the configured PHY timing role when applying Ethernet link
+  negotiation settings through ethtool netlink (requires Linux 5.6 or newer).
+* With Ethernet autonegotiation enabled, advertise all supported link modes
+  matching the configured speed and duplex, including fibre and backplane
+  modes.
+* The "Reload" D-Bus method returns an error when reading the
+  configuration fails, for example on a parse error, instead of only
+  logging the failure and reporting success. "nmcli general reload" and
+  "systemctl reload NetworkManager" fail in that case too.
+* Support new properties for bridge ports: bpdu-guard, broadcast-flood,
+  fast-leave, isolated, learning, locked, multicast-flood,
+  multicast-to-unicast, neighbor-suppress, neighbor-vlan-suppress,
+  root-block, unicast-flood, vlan-tunnel.
+* Checkpoint rollback reactivates connections that are still being
+  deactivated, keeping external bridge ports attached, and no longer
+  reactivates unchanged activations of a multi-connect profile.
+* Include the applied connection's UUID in device journal entries for
+  filtering with "journalctl NM_CONNECTION=<uuid>".
+* Add new property '802-1x.server-cert-hash' to allow authentication server
+  verification by certificate hash, primarily to support Trust On First Use
+  (TOFU).
 
 initrd:
 * Add the "rd.net.timeout.ip-required" kernel command line argument
@@ -65,6 +86,12 @@ Wi-Fi:
   cancel the peer search of an ongoing activation; the IWD backend
   already refused it.
 * Fix lax permissions on newly mirrored IWD profiles.
+* The Wi-Fi P2P peer exposes the WPS configuration methods it
+  advertises (the "WpsConfigMethods" D-Bus property,
+  nm_wifi_p2p_peer_get_wps_config_methods()), so a client can see
+  which WPS methods the peer offers (push-button, display, keypad) and
+  pick the matching "wifi-p2p.wps-method" before connecting instead of
+  always attempting push-button.
 
 nmtui / nmcli:
 * Group known and other Wi-Fi networks separately in the "Activate a

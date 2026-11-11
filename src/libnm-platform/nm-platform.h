@@ -179,7 +179,20 @@ typedef struct {
 typedef struct {
     guint32 path_cost;
     guint16 priority;
+    bool    bpdu_guard;
+    bool    broadcast_flood;
+    bool    fast_leave;
     bool    hairpin;
+    bool    isolated;
+    bool    learning;
+    bool    locked;
+    bool    multicast_flood;
+    bool    multicast_to_unicast;
+    bool    neighbor_suppress;
+    bool    neighbor_vlan_suppress;
+    bool    root_block;
+    bool    unicast_flood;
+    bool    vlan_tunnel;
 } NMPlatformLinkBridgePort;
 
 typedef union {
@@ -1084,6 +1097,8 @@ typedef enum {
     NM_PLATFORM_KERNEL_SUPPORT_TYPE_FRA_IP_PROTO,
 
     NM_PLATFORM_KERNEL_SUPPORT_TYPE_IFLA_BOND_PORT_PRIO,
+    NM_PLATFORM_KERNEL_SUPPORT_TYPE_IFLA_BRPORT_LOCKED,
+    NM_PLATFORM_KERNEL_SUPPORT_TYPE_IFLA_BRPORT_NEIGH_VLAN_SUPPRESS,
 
     _NM_PLATFORM_KERNEL_SUPPORT_NUM,
 } NMPlatformKernelSupportType;
@@ -1379,6 +1394,12 @@ typedef struct {
     gboolean (*ethtool_set_eee)(NMPlatform *self, int ifindex, const NMEthtoolEEEState *eee);
     gboolean (*ethtool_get_ring)(NMPlatform *self, int ifindex, NMEthtoolRingState *ring);
     gboolean (*ethtool_set_ring)(NMPlatform *self, int ifindex, const NMEthtoolRingState *ring);
+    gboolean (*ethtool_get_link_settings)(NMPlatform                 *self,
+                                          int                         ifindex,
+                                          NMEthtoolLinkSettingsState *settings);
+    gboolean (*ethtool_set_link_settings)(NMPlatform                       *self,
+                                          int                               ifindex,
+                                          const NMEthtoolLinkSettingsState *settings);
 } NMPlatformClass;
 
 /* NMPlatform signals
