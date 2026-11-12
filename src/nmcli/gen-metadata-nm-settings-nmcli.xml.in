@@ -201,6 +201,10 @@
         <property name="ca-path"
                   nmcli-description="UTF-8 encoded path to a directory containing PEM or DER formatted certificates to be added to the verification chain in addition to the certificate specified in the &quot;ca-cert&quot; property. If NMSetting8021x:system-ca-certs is enabled and the built-in CA path is an existing directory, then this setting is ignored."
                   format="string" />
+        <property name="ca-verify-mode"
+                  nmcli-description="Controls TLS server certificate verification when no CA certificate is configured. When set to &quot;tofu&quot; (1), NetworkManager uses Trust-On-First-Use: it prompts the user to accept the server certificate on first connection and pins it for subsequent connections. Default (0) preserves existing behavior."
+                  format="enum (NMSetting8021xCaVerifyMode)"
+                  values="default (0), tofu (1)" />
         <property name="server-cert-hash"
                   nmcli-description="Pins the authentication server&apos;s certificate by its SHA-256 hash, bypassing the need for a CA certificate to validate the incoming server certificate. 32 colon-separated hex pairs (the server leaf certificate&apos;s SHA-256 fingerprint); either letter case is accepted, but the value is canonicalized to uppercase. Do not set this property together with &quot;ca-cert&quot;, &quot;system-ca-certs&quot;, or &quot;ca-path&quot;, as these provide alternative ways to validate the authentication server."
                   format="string" />

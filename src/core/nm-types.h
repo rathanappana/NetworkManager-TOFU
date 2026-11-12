@@ -14,6 +14,7 @@
 typedef struct _NMDBusObject            NMDBusObject;
 typedef struct _NMActiveConnection      NMActiveConnection;
 typedef struct _NMAuditManager          NMAuditManager;
+typedef struct _NMTofuSession           NMTofuSession;
 typedef struct _NMVpnConnection         NMVpnConnection;
 typedef struct _NMActRequest            NMActRequest;
 typedef struct _NMAuthSubject           NMAuthSubject;

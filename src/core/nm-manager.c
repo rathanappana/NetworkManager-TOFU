@@ -1826,6 +1826,8 @@ _reload_auth_cb(NMAuthChain *chain, GDBusMethodInvocation *context, gpointer use
     g_dbus_method_invocation_return_value(context, NULL);
 }
 
+/*****************************************************************************/
+
 static void
 impl_manager_reload(NMDBusObject                      *obj,
                     const NMDBusInterfaceInfoExtended *interface_info,

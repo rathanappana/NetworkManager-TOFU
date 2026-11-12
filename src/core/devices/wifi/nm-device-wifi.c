@@ -41,6 +41,7 @@
 #include "nm-wifi-common.h"
 #include "libnm-core-intern/nm-core-internal.h"
 #include "nm-config.h"
+#include "tofu/nm-tofu-connection.h"
 
 #define _NMLOG_DEVICE_TYPE NMDeviceWifi
 #include "devices/nm-device-logging.h"
@@ -111,10 +112,10 @@ typedef struct {
 
     guint periodic_update_id;
 
-    guint link_timeout_id;
-    guint reacquire_iface_id;
-    guint wps_timeout_id;
-    guint sup_timeout_id; /* supplicant association timeout */
+    guint    link_timeout_id;
+    guint    reacquire_iface_id;
+    guint    wps_timeout_id;
+    GSource *sup_timeout_source;
 
     _NMDeviceWifiCapabilities    capabilities;
     _NMSettingWirelessWakeOnWLan wowlan_restore;
@@ -2108,7 +2109,7 @@ cleanup_association_attempt(NMDeviceWifi *self, gboolean disconnect)
 {
     NMDeviceWifiPrivate *priv = NM_DEVICE_WIFI_GET_PRIVATE(self);
 
-    nm_clear_g_source(&priv->sup_timeout_id);
+    nm_clear_g_source_inst(&priv->sup_timeout_source);
     nm_clear_g_source(&priv->link_timeout_id);
     nm_clear_g_source(&priv->wps_timeout_id);
     if (disconnect && priv->sup_iface)
@@ -2604,7 +2605,7 @@ supplicant_iface_state(NMDeviceWifi              *self,
 
     switch (new_state) {
     case NM_SUPPLICANT_INTERFACE_STATE_COMPLETED:
-        nm_clear_g_source(&priv->sup_timeout_id);
+        nm_clear_g_source_inst(&priv->sup_timeout_source);
         nm_clear_g_source(&priv->link_timeout_id);
         nm_clear_g_source(&priv->wps_timeout_id);
 
@@ -3575,8 +3576,9 @@ act_stage2_config(NMDevice *device, NMDeviceStateReason *out_failure_reason)
     NMActRequest                       *request;
     NMActiveConnection                 *controller_ac;
     NMDevice                           *controller;
+    gboolean                            skip_sup_timeout = FALSE;
 
-    nm_clear_g_source(&priv->sup_timeout_id);
+    nm_clear_g_source_inst(&priv->sup_timeout_source);
     nm_clear_g_source(&priv->link_timeout_id);
     nm_clear_g_source(&priv->wps_timeout_id);
 
@@ -3661,11 +3663,24 @@ act_stage2_config(NMDevice *device, NMDeviceStateReason *out_failure_reason)
     } else
         nm_supplicant_interface_set_bridge(priv->sup_iface, NULL);
 
+    /* TOFU: Check for a fresh trust-on-first-use session when CA verification
+     * mode is set to TOFU and no CA certificate scheme is defined yet.
+     */
+    nm_tofu_connection_setup(connection,
+                             sett_conn,
+                             s_wireless,
+                             config,
+                             NM_ACTIVE_CONNECTION(req),
+                             &skip_sup_timeout);
+
     nm_supplicant_interface_assoc(priv->sup_iface, config, supplicant_iface_assoc_cb, self);
 
     /* Set up a timeout on the association attempt */
-    timeout              = nm_device_get_supplicant_timeout(NM_DEVICE(self));
-    priv->sup_timeout_id = g_timeout_add_seconds(timeout, supplicant_connection_timeout_cb, self);
+    if (!skip_sup_timeout) {
+        timeout = nm_device_get_supplicant_timeout(NM_DEVICE(self));
+        priv->sup_timeout_source =
+            nm_g_timeout_add_seconds_source(timeout, supplicant_connection_timeout_cb, self);
+    }
 
     if (!priv->periodic_update_id)
         priv->periodic_update_id = g_timeout_add_seconds(6, periodic_update_cb, self);
