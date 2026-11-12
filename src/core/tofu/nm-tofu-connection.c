@@ -25,8 +25,8 @@
  * equivalents) is registered via AgentManager.RegisterWithCapabilities +
  * NM_SECRET_AGENT_CAPABILITY_WIFI_TOFU, so nm_agent_manager_find_secret_agent()
  * can find it — no separate registration entry point needed. */
-#define CERT_AGENT_OBJECT_PATH   "/org/freedesktop/networkmanager/certificateagent"
-#define CERT_AGENT_IFACE         "org.freedesktop.networkmanager.certificateagent"
+#define CERT_AGENT_OBJECT_PATH   "/org/freedesktop/NetworkManager/CertificateAgent"
+#define CERT_AGENT_IFACE         "org.freedesktop.NetworkManager.CertificateAgent"
 #define NM_CERT_AGENT_TIMEOUT_MS 180000
 
 /*****************************************************************************/
