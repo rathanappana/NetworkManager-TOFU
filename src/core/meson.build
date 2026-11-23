@@ -332,6 +332,19 @@ NetworkManager = executable(
 )
 
 if enable_tests
+  test(
+    'tofu-agent-registration',
+    python,
+    args: [
+      files('tests/test-tofu-agent.py'),
+      NetworkManager.full_path(),
+      nm_pkgstatedir,
+      nm_pkgrundir,
+    ],
+    depends: NetworkManager,
+    timeout: 60,
+  )
+
   foreach mode: ['explicit', 'timeout', 'single-explicit', 'single-timeout', 'unchanged', 'external-port', 'recreate']
     test(
       'checkpoint-rollback-' + mode,
