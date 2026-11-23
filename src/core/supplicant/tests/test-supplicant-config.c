@@ -1147,6 +1147,60 @@ test_8021x_server_cert_hash(void)
     nmtst_logging_reenable(logging);
 }
 
+static void
+test_8021x_tofu_suppresses_credentials(void)
+{
+    gs_unref_object NMSupplicantConfig *config             = NULL;
+    gs_unref_object NMSetting8021x     *s_8021x            = NULL;
+    gs_unref_variant GVariant          *dict               = NULL;
+    gs_unref_variant GVariant          *anonymous_identity = NULL;
+    gs_free_error GError               *error              = NULL;
+    gpointer                            logging;
+    gsize                               anonymous_identity_len;
+    const guint8                       *anonymous_identity_data;
+
+    logging = nmtst_logging_disable(TRUE);
+
+    s_8021x = (NMSetting8021x *) nm_setting_802_1x_new();
+    nm_setting_802_1x_add_eap_method(s_8021x, "peap");
+    g_object_set(s_8021x,
+                 NM_SETTING_802_1X_IDENTITY,
+                 "user",
+                 NM_SETTING_802_1X_PASSWORD,
+                 "secret",
+                 NM_SETTING_802_1X_ANONYMOUS_IDENTITY,
+                 "anonymous",
+                 NULL);
+
+    config = nm_supplicant_config_new(NM_SUPPL_CAP_MASK_NONE, NULL);
+    g_assert(nm_supplicant_config_add_setting_8021x(config,
+                                                    s_8021x,
+                                                    "test-uuid",
+                                                    0,
+                                                    FALSE,
+                                                    NULL,
+                                                    &error));
+    g_assert_no_error(error);
+
+    nm_supplicant_config_suppress_credentials_for_tofu(config);
+    dict = nm_supplicant_config_to_variant(config);
+
+    g_assert_null(g_variant_lookup_value(dict, "identity", NULL));
+    g_assert_null(g_variant_lookup_value(dict, "password", NULL));
+
+    anonymous_identity = g_variant_lookup_value(dict, "anonymous_identity", NULL);
+    g_assert_nonnull(anonymous_identity);
+    g_assert_true(g_variant_is_of_type(anonymous_identity, G_VARIANT_TYPE("ay")));
+    anonymous_identity_data =
+        g_variant_get_fixed_array(anonymous_identity, &anonymous_identity_len, sizeof(guint8));
+    g_assert_cmpmem(anonymous_identity_data,
+                    anonymous_identity_len,
+                    "anonymous",
+                    strlen("anonymous"));
+
+    nmtst_logging_reenable(logging);
+}
+
 /*****************************************************************************/
 
 static void
@@ -1209,6 +1263,8 @@ main(int argc, char **argv)
     g_test_add_func("/supplicant-config/8021x-ca-path-private-connection",
                     test_8021x_ca_path_private_connection);
     g_test_add_func("/supplicant-config/8021x-server-cert-hash", test_8021x_server_cert_hash);
+    g_test_add_func("/supplicant-config/8021x-tofu-suppresses-credentials",
+                    test_8021x_tofu_suppresses_credentials);
     g_test_add_func("/supplicant-config/8021x-peaplabel", test_8021x_peaplabel);
 
     return g_test_run();
