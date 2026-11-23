@@ -119,25 +119,13 @@ tofu_update_ca_cert_hash(const char                     *uuid,
 {
     NMSettingsConnection *sconn = nm_settings_get_connection_by_uuid(nm_settings_get(), uuid);
     NMConnection         *clone;
-    NMSetting8021x       *s_8021x;
-    gs_free char         *hash_uri = g_strdup_printf("hash://server/sha256/%s", hash_hex);
-    gs_free_error GError *error    = NULL;
+    gs_free_error GError *error = NULL;
 
     if (!sconn || !hash_hex)
         return;
 
-    clone   = nm_simple_connection_new_clone(nm_settings_connection_get_connection(sconn));
-    s_8021x = nm_connection_get_setting_802_1x(clone);
-
-    if (s_8021x) {
-        nm_setting_802_1x_set_ca_cert(s_8021x,
-                                      hash_uri,
-                                      NM_SETTING_802_1X_CK_SCHEME_SERVER_HASH,
-                                      NULL,
-                                      &error);
-        if (domain && *domain)
-            g_object_set(s_8021x, NM_SETTING_802_1X_DOMAIN_MATCH, domain, NULL);
-
+    clone = nm_simple_connection_new_clone(nm_settings_connection_get_connection(sconn));
+    if (nm_tofu_connection_set_ca_cert_hash(clone, hash_hex, domain, &error)) {
         nm_settings_connection_update(sconn,
                                       NULL,
                                       clone,
@@ -147,8 +135,47 @@ tofu_update_ca_cert_hash(const char                     *uuid,
                                       NM_SETTINGS_CONNECTION_UPDATE_REASON_UPDATE_NON_SECRET,
                                       "tofu",
                                       NULL);
+    } else {
+        _NMLOG(LOGL_WARN,
+               "failed to set server certificate hash for uuid=%s: %s",
+               uuid,
+               error->message);
     }
     g_object_unref(clone);
+}
+
+gboolean
+nm_tofu_connection_set_ca_cert_hash(NMConnection *connection,
+                                    const char   *hash_hex,
+                                    const char   *domain,
+                                    GError      **error)
+{
+    NMSetting8021x *s_8021x;
+    gs_free char   *hash_uri = NULL;
+
+    g_return_val_if_fail(NM_IS_CONNECTION(connection), FALSE);
+    g_return_val_if_fail(hash_hex && hash_hex[0], FALSE);
+
+    s_8021x = nm_connection_get_setting_802_1x(connection);
+    if (!s_8021x) {
+        g_set_error_literal(error,
+                            NM_CONNECTION_ERROR,
+                            NM_CONNECTION_ERROR_MISSING_SETTING,
+                            "connection has no 802.1X setting");
+        return FALSE;
+    }
+
+    hash_uri = g_strdup_printf("hash://server/sha256/%s", hash_hex);
+    if (!nm_setting_802_1x_set_ca_cert(s_8021x,
+                                       hash_uri,
+                                       NM_SETTING_802_1X_CK_SCHEME_SERVER_HASH,
+                                       NULL,
+                                       error))
+        return FALSE;
+
+    if (domain && domain[0])
+        g_object_set(s_8021x, NM_SETTING_802_1X_DOMAIN_MATCH, domain, NULL);
+    return TRUE;
 }
 
 static gboolean
@@ -379,23 +406,37 @@ tofu_temp_pin_state_changed_cb(NMActiveConnection *active, GParamSpec *pspec, gp
     g_object_set_data(G_OBJECT(active), "tofu-temp-pin-uuid", NULL);
 }
 
+NMTofuConnectionDecision
+nm_tofu_connection_decide(gboolean accepted, gboolean authorized)
+{
+    if (accepted)
+        return authorized ? NM_TOFU_CONNECTION_DECISION_ACCEPT_PERSIST
+                          : NM_TOFU_CONNECTION_DECISION_ACCEPT_TEMPORARY;
+    return authorized ? NM_TOFU_CONNECTION_DECISION_REJECT_DELETE
+                      : NM_TOFU_CONNECTION_DECISION_REJECT_KEEP;
+}
+
 /* Polkit callback (Stage 4b) */
 static void
 on_polkit_check_cb(gboolean authorized, gpointer user_data)
 {
-    GTask             *task             = G_TASK(user_data);
-    TofuConnectionCtx *ctx              = g_task_get_task_data(task);
-    NMToFuSession     *session          = nm_tofu_session_get();
-    gboolean           temp_pin_applied = FALSE;
+    GTask                   *task             = G_TASK(user_data);
+    TofuConnectionCtx       *ctx              = g_task_get_task_data(task);
+    NMToFuSession           *session          = nm_tofu_session_get();
+    gboolean                 temp_pin_applied = FALSE;
+    NMTofuConnectionDecision decision;
 
-    if (ctx->accepted) {
+    decision = nm_tofu_connection_decide(ctx->accepted, authorized);
+    if (NM_IN_SET(decision,
+                  NM_TOFU_CONNECTION_DECISION_ACCEPT_PERSIST,
+                  NM_TOFU_CONNECTION_DECISION_ACCEPT_TEMPORARY)) {
         GBytes       *root_der  = NULL;
         const char   *leaf_hash = NULL;
         gs_free char *domain    = NULL;
 
         nm_tofu_session_get_pin_data(session, &root_der, &leaf_hash, (const char **) &domain);
 
-        if (authorized) {
+        if (decision == NM_TOFU_CONNECTION_DECISION_ACCEPT_PERSIST) {
             if (tofu_update_ca_cert(session,
                                     ctx->uuid,
                                     root_der,
@@ -429,7 +470,7 @@ on_polkit_check_cb(gboolean authorized, gpointer user_data)
 
         tofu_set_autoconnect_for_uuid(ctx->uuid,
                                       TRUE,
-                                      authorized
+                                      decision == NM_TOFU_CONNECTION_DECISION_ACCEPT_PERSIST
                                           ? NM_SETTINGS_CONNECTION_PERSIST_MODE_TO_DISK
                                           : NM_SETTINGS_CONNECTION_PERSIST_MODE_IN_MEMORY_DETACHED);
         tofu_add_timestamp_to_connection(ctx->uuid);
@@ -453,17 +494,14 @@ on_polkit_check_cb(gboolean authorized, gpointer user_data)
             tofu_authenticate_connection_by_uuid(ctx->uuid);
         }
 
+    } else if (decision == NM_TOFU_CONNECTION_DECISION_REJECT_DELETE) {
+        tofu_remove_connection(ctx->uuid);
+        _NMLOG(LOGL_INFO, "user rejected cert; profile removed for SSID=%s", ctx->ssid);
     } else {
-        /* User Rejected */
-        if (authorized) {
-            tofu_remove_connection(ctx->uuid);
-            _NMLOG(LOGL_INFO, "user rejected cert; profile removed for SSID=%s", ctx->ssid);
-        } else {
-            _NMLOG(LOGL_INFO,
-                   "user rejected cert for SSID=%s, but not authorized to delete this profile — "
-                   "left in place",
-                   ctx->ssid);
-        }
+        _NMLOG(LOGL_INFO,
+               "user rejected cert for SSID=%s, but not authorized to delete this profile — "
+               "left in place",
+               ctx->ssid);
     }
 
     nm_tofu_session_reset(session);
@@ -521,18 +559,15 @@ tofu_polkit_check_modify(NMConnection      *connection,
 static void
 on_agent_response_cb(GObject *source_object, GAsyncResult *res, gpointer user_data)
 {
-    GTask                     *task       = G_TASK(user_data);
-    TofuConnectionCtx         *ctx        = g_task_get_task_data(task);
-    gs_unref_variant GVariant *reply      = NULL;
-    gs_free_error GError      *error      = NULL;
-    NMConnection              *connection = NULL;
+    GTask                *task       = G_TASK(user_data);
+    TofuConnectionCtx    *ctx        = g_task_get_task_data(task);
+    gs_free_error GError *error      = NULL;
+    NMConnection         *connection = NULL;
 
-    reply = g_dbus_connection_call_finish(G_DBUS_CONNECTION(source_object), res, &error);
-
-    if (reply) {
-        /* Store the user's decision directly into the context */
-        g_variant_get(reply, "(b)", &ctx->accepted);
-    } else {
+    if (!nm_tofu_connection_agent_call_finish(G_DBUS_CONNECTION(source_object),
+                                              res,
+                                              &ctx->accepted,
+                                              &error)) {
         /* DBUS CANCELLATION ABORT */
         if (g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
             _NMLOG(LOGL_DEBUG, "DBus prompt cancelled, aborting TOFU flow for SSID=%s", ctx->ssid);
@@ -556,6 +591,83 @@ on_agent_response_cb(GObject *source_object, GAsyncResult *res, gpointer user_da
         /* If no polkit check could be started (e.g., no human subject), default to unauthorized */
         on_polkit_check_cb(FALSE, task);
     }
+}
+
+gboolean
+nm_tofu_connection_agent_call_request(GDBusConnection    *dbus_conn,
+                                      const char         *dest_agent,
+                                      NMToFuSession      *session,
+                                      GCancellable       *cancellable,
+                                      GAsyncReadyCallback callback,
+                                      gpointer            user_data)
+{
+    const char   *disclaimer;
+    const char   *ssid;
+    gs_free char *cn     = NULL;
+    gs_free char *issuer = NULL;
+    gs_free char *org    = NULL;
+    gs_free char *sha256 = NULL;
+    gs_free char *exp    = NULL;
+    gs_free char *url    = NULL;
+
+    g_return_val_if_fail(G_IS_DBUS_CONNECTION(dbus_conn), FALSE);
+    g_return_val_if_fail(dest_agent && dest_agent[0], FALSE);
+    g_return_val_if_fail(NM_IS_TOFU_SESSION(session), FALSE);
+
+    if (!nm_tofu_session_get_display_fields(session, &cn, &issuer, &org, &sha256, &exp, &url))
+        return FALSE;
+
+    ssid = nm_tofu_session_get_ssid(session);
+    if (nm_tofu_session_get_via_system_trust(session)) {
+        disclaimer =
+            _("Review the server certificate details below before trusting this network. "
+              "Its issuing CA is also recognized by your system's trusted certificate store, "
+              "which supports (but does not guarantee) that it is legitimate.");
+    } else {
+        disclaimer = _("Review the server certificate details below before trusting this network.");
+    }
+
+    g_dbus_connection_call(dbus_conn,
+                           dest_agent,
+                           CERT_AGENT_OBJECT_PATH,
+                           CERT_AGENT_IFACE,
+                           "CertificateVerificationRequest",
+                           g_variant_new("(ssssssss)",
+                                         ssid ? ssid : "",
+                                         cn ? cn : "N/A",
+                                         issuer ? issuer : "N/A",
+                                         org ? org : "N/A",
+                                         sha256 ? sha256 : "N/A",
+                                         exp ? exp : "N/A",
+                                         disclaimer,
+                                         url ? url : "N/A"),
+                           G_VARIANT_TYPE("(b)"),
+                           G_DBUS_CALL_FLAGS_NONE,
+                           NM_CERT_AGENT_TIMEOUT_MS,
+                           cancellable,
+                           callback,
+                           user_data);
+    return TRUE;
+}
+
+gboolean
+nm_tofu_connection_agent_call_finish(GDBusConnection *dbus_conn,
+                                     GAsyncResult    *result,
+                                     gboolean        *out_accepted,
+                                     GError         **error)
+{
+    gs_unref_variant GVariant *reply = NULL;
+
+    g_return_val_if_fail(G_IS_DBUS_CONNECTION(dbus_conn), FALSE);
+    g_return_val_if_fail(G_IS_ASYNC_RESULT(result), FALSE);
+    g_return_val_if_fail(out_accepted != NULL, FALSE);
+
+    reply = g_dbus_connection_call_finish(dbus_conn, result, error);
+    if (!reply)
+        return FALSE;
+
+    g_variant_get(reply, "(b)", out_accepted);
+    return TRUE;
 }
 
 /* Signal Handler (Stage 3) */
@@ -590,14 +702,6 @@ tofu_on_stage3_ready(NMToFuSession *session, gpointer user_data)
 
     gs_free char *dest_agent = NULL;
     const char   *ssid       = nm_tofu_session_get_ssid(session);
-    const char   *disclaimer;
-
-    gs_free char *cn     = NULL;
-    gs_free char *issuer = NULL;
-    gs_free char *org    = NULL;
-    gs_free char *sha256 = NULL;
-    gs_free char *exp    = NULL;
-    gs_free char *url    = NULL;
 
     if (!nm_streq0(ctx->uuid, nm_tofu_session_get_uuid(session))) {
         _NMLOG(LOGL_DEBUG,
@@ -612,21 +716,12 @@ tofu_on_stage3_ready(NMToFuSession *session, gpointer user_data)
         return;
     }
 
-    if (!nm_tofu_session_get_display_fields(session, &cn, &issuer, &org, &sha256, &exp, &url)) {
+    if (!nm_tofu_session_get_display_fields(session, NULL, NULL, NULL, NULL, NULL, NULL)) {
         _NMLOG(LOGL_WARN, "failed to extract certificate display fields");
         return;
     }
 
-    if (nm_tofu_session_get_via_system_trust(session)) {
-        disclaimer =
-            _("Review the server certificate details below before trusting this network. "
-              "Its issuing CA is also recognized by your system's trusted certificate store, "
-              "which supports (but does not guarantee) that it is legitimate.");
-    } else {
-        disclaimer = _("Review the server certificate details below before trusting this network.");
-    }
-
-    /* Disconnect the state watcher BEFORE we intentionally deauthenticate, 
+    /* Disconnect the state watcher BEFORE we intentionally deauthenticate,
        so we don't accidentally cancel our own DBus prompt. */
     if (ctx->ac_state_id && ctx->req) {
         nm_clear_g_signal_handler(ctx->req, &ctx->ac_state_id);
@@ -636,27 +731,16 @@ tofu_on_stage3_ready(NMToFuSession *session, gpointer user_data)
     tofu_deauthenticate_connection_by_uuid(ctx->uuid);
     tofu_set_autoconnect_for_uuid(ctx->uuid, FALSE, NM_SETTINGS_CONNECTION_PERSIST_MODE_KEEP);
 
-    /* Dispatch DBus Call to CertificateAgent */
-    g_dbus_connection_call(dbus_conn,
-                           dest_agent,
-                           CERT_AGENT_OBJECT_PATH,
-                           CERT_AGENT_IFACE,
-                           "CertificateVerificationRequest",
-                           g_variant_new("(ssssssss)",
-                                         ssid ? ssid : "",
-                                         cn ? cn : "N/A",
-                                         issuer ? issuer : "N/A",
-                                         org ? org : "N/A",
-                                         sha256 ? sha256 : "N/A",
-                                         exp ? exp : "N/A",
-                                         disclaimer,
-                                         url ? url : "N/A"),
-                           G_VARIANT_TYPE("(b)"),
-                           G_DBUS_CALL_FLAGS_NONE,
-                           NM_CERT_AGENT_TIMEOUT_MS,
-                           g_task_get_cancellable(task),
-                           on_agent_response_cb,
-                           task);
+    if (!nm_tofu_connection_agent_call_request(dbus_conn,
+                                               dest_agent,
+                                               session,
+                                               g_task_get_cancellable(task),
+                                               on_agent_response_cb,
+                                               task)) {
+        _NMLOG(LOGL_WARN,
+               "failed to extract certificate display fields for SSID=%s",
+               ssid ? ssid : "<unknown>");
+    }
 }
 
 static gboolean
@@ -685,6 +769,32 @@ _is_tofu_eligible(NMSetting8021x *s_8021x)
            && _has_supported_eap_method(s_8021x);
 }
 
+gboolean
+nm_tofu_connection_prepare(NMConnection       *connection,
+                           const char         *uuid,
+                           const char         *ssid,
+                           NMAuthSubject      *subject,
+                           NMSupplicantConfig *config,
+                           gboolean           *out_skip_sup_timeout)
+{
+    NMSetting8021x *s_8021x;
+
+    g_return_val_if_fail(NM_IS_CONNECTION(connection), FALSE);
+    g_return_val_if_fail(uuid && uuid[0], FALSE);
+    g_return_val_if_fail(NM_IS_SUPPLICANT_CONFIG(config), FALSE);
+    g_return_val_if_fail(out_skip_sup_timeout != NULL, FALSE);
+
+    *out_skip_sup_timeout = FALSE;
+    s_8021x               = nm_connection_get_setting_802_1x(connection);
+    if (!_is_tofu_eligible(s_8021x))
+        return FALSE;
+
+    nm_tofu_session_set(nm_tofu_session_get(), NM_TOFU_SESSION_TYPE_TOFU, ssid, uuid, subject);
+    nm_supplicant_config_suppress_credentials_for_tofu(config);
+    *out_skip_sup_timeout = TRUE;
+    return TRUE;
+}
+
 void
 nm_tofu_connection_setup(NMConnection         *connection,
                          NMSettingsConnection *sett_conn,
@@ -693,7 +803,6 @@ nm_tofu_connection_setup(NMConnection         *connection,
                          NMActiveConnection   *req,
                          gboolean             *out_skip_sup_timeout)
 {
-    NMSetting8021x    *s_8021x;
     const char        *uuid;
     gs_free char      *ssid_str = NULL;
     GBytes            *ssid_bytes;
@@ -703,22 +812,17 @@ nm_tofu_connection_setup(NMConnection         *connection,
 
     /* ... existing early returns and setup ... */
 
-    s_8021x = nm_connection_get_setting_802_1x(connection);
-    if (!_is_tofu_eligible(s_8021x))
-        return;
-
     uuid       = nm_settings_connection_get_uuid(sett_conn);
     ssid_bytes = nm_setting_wireless_get_ssid(s_wireless);
     ssid_str   = ssid_bytes ? _nm_utils_ssid_to_utf8(ssid_bytes) : NULL;
 
-    nm_tofu_session_set(nm_tofu_session_get(),
-                        NM_TOFU_SESSION_TYPE_TOFU,
-                        ssid_str,
-                        uuid,
-                        nm_active_connection_get_subject(req));
-    nm_supplicant_config_suppress_credentials_for_tofu(config);
-
-    *out_skip_sup_timeout = TRUE;
+    if (!nm_tofu_connection_prepare(connection,
+                                    uuid,
+                                    ssid_str,
+                                    nm_active_connection_get_subject(req),
+                                    config,
+                                    out_skip_sup_timeout))
+        return;
 
     /* --- New Cancellable Logic --- */
     cancellable = g_cancellable_new();
