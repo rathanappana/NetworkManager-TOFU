@@ -453,6 +453,125 @@ test_8021x_cert_tpm2key(void)
     _test_8021x_cert_from_files(TEST_WIRED_TLS_CA_CERT, TEST_WIRED_TLS_TPM2KEY);
 }
 
+static void
+test_8021x_ca_verify_mode(void)
+{
+    gs_unref_object NMConnection *con =
+        nmtst_create_minimal_connection("test-ca-verify-mode",
+                                        NULL,
+                                        NM_SETTING_WIRED_SETTING_NAME,
+                                        NULL);
+    nm_auto_unref_keyfile GKeyFile *keyfile = NULL;
+    NMSetting8021x                 *s_8021x;
+    gs_free char                   *value = NULL;
+
+    s_8021x = (NMSetting8021x *) nm_setting_802_1x_new();
+    nm_setting_802_1x_add_eap_method(s_8021x, "ttls");
+    g_object_set(s_8021x,
+                 NM_SETTING_802_1X_IDENTITY,
+                 "user",
+                 NM_SETTING_802_1X_PHASE2_AUTH,
+                 "pap",
+                 NM_SETTING_802_1X_CA_VERIFY_MODE,
+                 NM_SETTING_802_1X_CA_VERIFY_MODE_TOFU,
+                 NULL);
+    nm_connection_add_setting(con, NM_SETTING(s_8021x));
+
+    nmtst_assert_connection_verifies_and_normalizable(con);
+    nmtst_connection_normalize(con);
+    _keyfile_convert(&con,
+                     &keyfile,
+                     "/test_8021x_ca_verify_mode/test",
+                     NULL,
+                     NULL,
+                     NULL,
+                     NULL,
+                     FALSE);
+
+    value = g_key_file_get_string(keyfile, "802-1x", "ca-verify-mode", NULL);
+    g_assert_cmpstr(value, ==, "1");
+
+    g_clear_object(&con);
+    _keyfile_convert(&con,
+                     &keyfile,
+                     "/test_8021x_ca_verify_mode/test",
+                     NULL,
+                     NULL,
+                     NULL,
+                     NULL,
+                     FALSE);
+    s_8021x = nm_connection_get_setting_802_1x(con);
+    g_assert_cmpint(nm_setting_802_1x_get_ca_verify_mode(s_8021x),
+                    ==,
+                    NM_SETTING_802_1X_CA_VERIFY_MODE_TOFU);
+}
+
+static void
+test_8021x_server_hash_uri(void)
+{
+    gs_unref_object NMConnection *con =
+        nmtst_create_minimal_connection("test-server-hash",
+                                        NULL,
+                                        NM_SETTING_WIRED_SETTING_NAME,
+                                        NULL);
+    nm_auto_unref_keyfile GKeyFile *keyfile = NULL;
+    NMSetting8021x                 *s_8021x;
+    gs_free char                   *value = NULL;
+    gs_free_error GError           *error = NULL;
+
+    s_8021x = (NMSetting8021x *) nm_setting_802_1x_new();
+    nm_setting_802_1x_add_eap_method(s_8021x, "ttls");
+    g_object_set(s_8021x,
+                 NM_SETTING_802_1X_IDENTITY,
+                 "user",
+                 NM_SETTING_802_1X_PHASE2_AUTH,
+                 "pap",
+                 NULL);
+    g_assert(nm_setting_802_1x_set_ca_cert(
+        s_8021x,
+        "hash://server/sha256/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        NM_SETTING_802_1X_CK_SCHEME_SERVER_HASH,
+        NULL,
+        &error));
+    g_assert_no_error(error);
+    nm_connection_add_setting(con, NM_SETTING(s_8021x));
+
+    nmtst_assert_connection_verifies_and_normalizable(con);
+    nmtst_connection_normalize(con);
+    _keyfile_convert(&con,
+                     &keyfile,
+                     "/test_8021x_server_hash_uri/test",
+                     NULL,
+                     NULL,
+                     NULL,
+                     NULL,
+                     FALSE);
+
+    value = g_key_file_get_string(keyfile, "802-1x", "ca-cert", NULL);
+    g_assert_cmpstr(
+        value,
+        ==,
+        "hash://server/sha256/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+
+    g_clear_object(&con);
+    _keyfile_convert(&con,
+                     &keyfile,
+                     "/test_8021x_server_hash_uri/test",
+                     NULL,
+                     NULL,
+                     NULL,
+                     NULL,
+                     FALSE);
+    s_8021x = nm_connection_get_setting_802_1x(con);
+    g_assert_cmpint(nm_setting_802_1x_get_ca_cert_scheme(s_8021x),
+                    ==,
+                    NM_SETTING_802_1X_CK_SCHEME_SERVER_HASH);
+    g_assert_cmpstr(
+        nm_setting_802_1x_get_ca_cert_uri(s_8021x),
+        ==,
+        "hash://server/sha256/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+}
+
 /*****************************************************************************/
 
 static void
@@ -993,6 +1112,8 @@ main(int argc, char **argv)
     g_test_add_func("/core/keyfile/encode_key", test_encode_key);
     g_test_add_func("/core/keyfile/test_8021x_cert", test_8021x_cert);
     g_test_add_func("/core/keyfile/test_8021x_cert_tpm2key", test_8021x_cert_tpm2key);
+    g_test_add_func("/core/keyfile/test_8021x_ca_verify_mode", test_8021x_ca_verify_mode);
+    g_test_add_func("/core/keyfile/test_8021x_server_hash_uri", test_8021x_server_hash_uri);
     g_test_add_func("/core/keyfile/test_8021x_cert_read", test_8021x_cert_read);
     g_test_add_func("/core/keyfile/test_team_conf_read/valid", test_team_conf_read_valid);
     g_test_add_func("/core/keyfile/test_team_conf_read/invalid", test_team_conf_read_invalid);
