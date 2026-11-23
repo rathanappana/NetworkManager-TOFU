@@ -9,10 +9,12 @@
 #include "devices/wifi/nm-wifi-ap.h"
 #include "devices/wifi/nm-device-wifi.h"
 #include "libnm-core-intern/nm-core-internal.h"
+#include "tofu/nm-tofu-connection.h"
 
 #include "nm-test-utils-core.h"
 
-#define DEBUG 1
+#define DEBUG               1
+#define TOFU_TEST_CERT_PATH NM_BUILD_SRCDIR "/src/libnm-core-impl/tests/certs/test_ca_cert.der"
 
 /*****************************************************************************/
 
@@ -241,14 +243,14 @@ test_lock_bssid(void)
 
     src      = nm_simple_connection_new();
     success  = complete_connection(ssid,
-                                   bssid,
-                                   _NM_802_11_MODE_INFRA,
-                                   NM_802_11_AP_FLAGS_NONE,
-                                   NM_802_11_AP_SEC_NONE,
-                                   NM_802_11_AP_SEC_NONE,
-                                   TRUE,
-                                   src,
-                                   &error);
+                                  bssid,
+                                  _NM_802_11_MODE_INFRA,
+                                  NM_802_11_AP_FLAGS_NONE,
+                                  NM_802_11_AP_SEC_NONE,
+                                  NM_802_11_AP_SEC_NONE,
+                                  TRUE,
+                                  src,
+                                  &error);
     expected = create_basic(ssid, bssid, _NM_802_11_MODE_INFRA);
     COMPARE(src, expected, success, error, 0, 0);
 
@@ -273,14 +275,14 @@ test_open_ap_empty_connection(void)
 
     src      = nm_simple_connection_new();
     success  = complete_connection(ssid,
-                                   bssid,
-                                   _NM_802_11_MODE_INFRA,
-                                   NM_802_11_AP_FLAGS_NONE,
-                                   NM_802_11_AP_SEC_NONE,
-                                   NM_802_11_AP_SEC_NONE,
-                                   FALSE,
-                                   src,
-                                   &error);
+                                  bssid,
+                                  _NM_802_11_MODE_INFRA,
+                                  NM_802_11_AP_FLAGS_NONE,
+                                  NM_802_11_AP_SEC_NONE,
+                                  NM_802_11_AP_SEC_NONE,
+                                  FALSE,
+                                  src,
+                                  &error);
     expected = create_basic(ssid, NULL, _NM_802_11_MODE_INFRA);
     COMPARE(src, expected, success, error, 0, 0);
 
@@ -1556,6 +1558,317 @@ test_ap_check_compatible_band(void)
     g_assert(!nm_wifi_ap_check_compatible(ap_rsn, conn));
 }
 
+static NMConnection *
+new_tofu_connection(void)
+{
+    NMConnection   *connection = nm_simple_connection_new();
+    NMSetting8021x *s_8021x    = NM_SETTING_802_1X(nm_setting_802_1x_new());
+
+    nm_setting_802_1x_add_eap_method(s_8021x, "peap");
+    g_object_set(s_8021x,
+                 NM_SETTING_802_1X_CA_VERIFY_MODE,
+                 NM_SETTING_802_1X_CA_VERIFY_MODE_TOFU,
+                 NM_SETTING_802_1X_IDENTITY,
+                 "user@example.test",
+                 NM_SETTING_802_1X_PASSWORD,
+                 "secret",
+                 NULL);
+    nm_connection_add_setting(connection, NM_SETTING(s_8021x));
+    return connection;
+}
+
+static void
+test_tofu_prepare(void)
+{
+    gs_unref_object NMConnection       *connection = new_tofu_connection();
+    gs_unref_object NMSupplicantConfig *config     = nm_supplicant_config_new(0, NULL);
+    gboolean                            skip_sup_timeout;
+    gpointer                            logging;
+
+    logging = nmtst_logging_disable(TRUE);
+    nm_tofu_session_reset(nm_tofu_session_get());
+    g_assert_true(nm_tofu_connection_prepare(connection,
+                                             "tofu-test-uuid",
+                                             "tofu-test-ssid",
+                                             NULL,
+                                             config,
+                                             &skip_sup_timeout));
+    g_assert_true(skip_sup_timeout);
+    g_assert_cmpint(nm_tofu_session_get_session_type(nm_tofu_session_get()),
+                    ==,
+                    NM_TOFU_SESSION_TYPE_TOFU);
+    g_assert_cmpstr(nm_tofu_session_get_ssid(nm_tofu_session_get()), ==, "tofu-test-ssid");
+    g_assert_cmpstr(nm_tofu_session_get_uuid(nm_tofu_session_get()), ==, "tofu-test-uuid");
+
+    nm_tofu_session_reset(nm_tofu_session_get());
+    g_object_set(nm_connection_get_setting_802_1x(connection),
+                 NM_SETTING_802_1X_CA_VERIFY_MODE,
+                 NM_SETTING_802_1X_CA_VERIFY_MODE_DEFAULT,
+                 NULL);
+    skip_sup_timeout = TRUE;
+    g_assert_false(nm_tofu_connection_prepare(connection,
+                                              "tofu-test-uuid",
+                                              "tofu-test-ssid",
+                                              NULL,
+                                              config,
+                                              &skip_sup_timeout));
+    g_assert_false(skip_sup_timeout);
+    g_assert_cmpint(nm_tofu_session_get_session_type(nm_tofu_session_get()),
+                    ==,
+                    NM_TOFU_SESSION_TYPE_DEFAULT);
+    nmtst_logging_reenable(logging);
+}
+
+static void
+test_tofu_profile_pin(void)
+{
+    gs_unref_object NMConnection *connection = new_tofu_connection();
+    NMSetting8021x               *s_8021x    = nm_connection_get_setting_802_1x(connection);
+    gs_free_error GError         *error      = NULL;
+    const char                   *hash       = "0123456789abcdef0123456789abcdef"
+                                               "0123456789abcdef0123456789abcdef";
+    gpointer                      logging;
+
+    logging = nmtst_logging_disable(TRUE);
+    g_assert_true(
+        nm_tofu_connection_set_ca_cert_hash(connection, hash, "radius.example.test", &error));
+    g_assert_no_error(error);
+    g_assert_cmpint(nm_setting_802_1x_get_ca_cert_scheme(s_8021x),
+                    ==,
+                    NM_SETTING_802_1X_CK_SCHEME_SERVER_HASH);
+    g_assert_cmpstr(nm_setting_802_1x_get_ca_cert_uri(s_8021x),
+                    ==,
+                    "hash://server/sha256/0123456789abcdef0123456789abcdef"
+                    "0123456789abcdef0123456789abcdef");
+    g_assert_cmpstr(nm_setting_802_1x_get_domain_match(s_8021x), ==, "radius.example.test");
+    nmtst_logging_reenable(logging);
+}
+
+static void
+test_tofu_decision(void)
+{
+    g_assert_cmpint(nm_tofu_connection_decide(TRUE, TRUE),
+                    ==,
+                    NM_TOFU_CONNECTION_DECISION_ACCEPT_PERSIST);
+    g_assert_cmpint(nm_tofu_connection_decide(TRUE, FALSE),
+                    ==,
+                    NM_TOFU_CONNECTION_DECISION_ACCEPT_TEMPORARY);
+    g_assert_cmpint(nm_tofu_connection_decide(FALSE, TRUE),
+                    ==,
+                    NM_TOFU_CONNECTION_DECISION_REJECT_DELETE);
+    g_assert_cmpint(nm_tofu_connection_decide(FALSE, FALSE),
+                    ==,
+                    NM_TOFU_CONNECTION_DECISION_REJECT_KEEP);
+}
+
+typedef struct {
+    GMainLoop *loop;
+    gboolean   accepted;
+    gboolean   response;
+    guint      requests;
+} TofuAgentTestData;
+
+static void
+tofu_agent_method_call(GDBusConnection       *connection,
+                       const char            *sender,
+                       const char            *object_path,
+                       const char            *interface_name,
+                       const char            *method_name,
+                       GVariant              *parameters,
+                       GDBusMethodInvocation *invocation,
+                       gpointer               user_data)
+{
+    TofuAgentTestData *data = user_data;
+    const char        *ssid;
+    const char        *common_name;
+    const char        *issuer;
+    const char        *organization;
+    const char        *hash;
+    const char        *expiration;
+    const char        *disclaimer;
+    const char        *url;
+
+    g_assert_cmpstr(method_name, ==, "CertificateVerificationRequest");
+    g_variant_get(parameters,
+                  "(&s&s&s&s&s&s&s&s)",
+                  &ssid,
+                  &common_name,
+                  &issuer,
+                  &organization,
+                  &hash,
+                  &expiration,
+                  &disclaimer,
+                  &url);
+    g_assert_cmpstr(ssid, ==, "tofu-test-ssid");
+    g_assert_nonnull(common_name);
+    g_assert_nonnull(issuer);
+    g_assert_nonnull(organization);
+    g_assert_cmpuint(strlen(hash), ==, 64);
+    g_assert_nonnull(expiration);
+    g_assert_nonnull(disclaimer);
+    g_assert_nonnull(url);
+    data->requests++;
+    g_dbus_method_invocation_return_value(invocation, g_variant_new("(b)", data->accepted));
+}
+
+static const GDBusInterfaceVTable tofu_agent_vtable = {
+    .method_call = tofu_agent_method_call,
+};
+
+static void
+tofu_agent_call_done(GObject *source_object, GAsyncResult *result, gpointer user_data)
+{
+    TofuAgentTestData    *data  = user_data;
+    gs_free_error GError *error = NULL;
+
+    g_assert_true(nm_tofu_connection_agent_call_finish(G_DBUS_CONNECTION(source_object),
+                                                       result,
+                                                       &data->response,
+                                                       &error));
+    g_assert_no_error(error);
+    g_main_loop_quit(data->loop);
+}
+
+static GVariant *
+build_tofu_cert_signal(GBytes *cert_data)
+{
+    GVariantBuilder builder;
+    gsize           cert_len;
+    gconstpointer   cert_bytes = g_bytes_get_data(cert_data, &cert_len);
+
+    g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT);
+    g_variant_builder_add(&builder, "{sv}", "depth", g_variant_new_uint32(0));
+    g_variant_builder_add(&builder,
+                          "{sv}",
+                          "subject",
+                          g_variant_new_string("CN=radius.example.test"));
+    g_variant_builder_add(&builder,
+                          "{sv}",
+                          "cert_hash",
+                          g_variant_new_string("0123456789abcdef0123456789abcdef"
+                                               "0123456789abcdef0123456789abcdef"));
+    g_variant_builder_add(
+        &builder,
+        "{sv}",
+        "cert",
+        g_variant_new_fixed_array(G_VARIANT_TYPE_BYTE, cert_bytes, cert_len, sizeof(guint8)));
+    return g_variant_new("(@a{sv})", g_variant_builder_end(&builder));
+}
+
+static void
+test_tofu_agent_request(void)
+{
+    static const char xml[] =
+        "<node><interface name='org.freedesktop.NetworkManager.CertificateAgent'>"
+        "<method name='CertificateVerificationRequest'>"
+        "<arg type='s' direction='in'/><arg type='s' direction='in'/>"
+        "<arg type='s' direction='in'/><arg type='s' direction='in'/>"
+        "<arg type='s' direction='in'/><arg type='s' direction='in'/>"
+        "<arg type='s' direction='in'/><arg type='s' direction='in'/>"
+        "<arg type='b' direction='out'/></method></interface></node>";
+    gs_unref_object GTestDBus          *test_bus      = g_test_dbus_new(G_TEST_DBUS_NONE);
+    GDBusNodeInfo                      *node_info     = NULL;
+    gs_unref_object GDBusConnection    *bus           = NULL;
+    gs_unref_object NMConnection       *connection    = new_tofu_connection();
+    gs_unref_object NMSupplicantConfig *config        = nm_supplicant_config_new(0, NULL);
+    gs_unref_bytes GBytes              *cert_data     = NULL;
+    gs_unref_variant GVariant          *cert_signal   = NULL;
+    gs_free char                       *cert_contents = NULL;
+    TofuAgentTestData                   data          = {};
+    gboolean                            skip_sup_timeout;
+    gsize                               cert_len;
+    guint                               registration_id;
+    const char                         *agent_name;
+    guint                               i;
+    gpointer                            logging;
+
+    logging = nmtst_logging_disable(TRUE);
+    g_test_dbus_up(test_bus);
+    bus =
+        g_dbus_connection_new_for_address_sync(g_test_dbus_get_bus_address(test_bus),
+                                               G_DBUS_CONNECTION_FLAGS_AUTHENTICATION_CLIENT
+                                                   | G_DBUS_CONNECTION_FLAGS_MESSAGE_BUS_CONNECTION,
+                                               NULL,
+                                               NULL,
+                                               NULL);
+    g_assert_nonnull(bus);
+
+    node_info = g_dbus_node_info_new_for_xml(xml, NULL);
+    g_assert_nonnull(node_info);
+    registration_id =
+        g_dbus_connection_register_object(bus,
+                                          "/org/freedesktop/NetworkManager/CertificateAgent",
+                                          node_info->interfaces[0],
+                                          &tofu_agent_vtable,
+                                          &data,
+                                          NULL,
+                                          NULL);
+    g_assert_cmpuint(registration_id, >, 0);
+    agent_name = g_dbus_connection_get_unique_name(bus);
+    g_assert_nonnull(agent_name);
+
+    g_assert_true(g_file_get_contents(TOFU_TEST_CERT_PATH, &cert_contents, &cert_len, NULL));
+    cert_data   = g_bytes_new(cert_contents, cert_len);
+    cert_signal = build_tofu_cert_signal(cert_data);
+    nm_tofu_session_reset(nm_tofu_session_get());
+    g_assert_true(nm_tofu_connection_prepare(connection,
+                                             "tofu-test-uuid",
+                                             "tofu-test-ssid",
+                                             NULL,
+                                             config,
+                                             &skip_sup_timeout));
+    g_assert_true(skip_sup_timeout);
+    nm_tofu_stage2_cert_signal(nm_tofu_session_get(), cert_signal);
+
+    data.loop = g_main_loop_new(NULL, FALSE);
+    for (i = 0; i < 2; i++) {
+        gs_unref_object NMConnection *profile = new_tofu_connection();
+        NMTofuConnectionDecision      decision;
+
+        data.accepted = i == 0;
+        g_assert_true(nm_tofu_connection_agent_call_request(bus,
+                                                            agent_name,
+                                                            nm_tofu_session_get(),
+                                                            NULL,
+                                                            tofu_agent_call_done,
+                                                            &data));
+        g_main_loop_run(data.loop);
+        g_assert_cmpint(data.response, ==, data.accepted);
+
+        decision = nm_tofu_connection_decide(data.response, TRUE);
+        if (data.response) {
+            gs_free_error GError *error = NULL;
+
+            g_assert_cmpint(decision, ==, NM_TOFU_CONNECTION_DECISION_ACCEPT_PERSIST);
+            g_assert_true(nm_tofu_connection_set_ca_cert_hash(profile,
+                                                              "0123456789abcdef0123456789abcdef"
+                                                              "0123456789abcdef0123456789abcdef",
+                                                              "radius.example.test",
+                                                              &error));
+            g_assert_no_error(error);
+            g_assert_cmpint(
+                nm_setting_802_1x_get_ca_cert_scheme(nm_connection_get_setting_802_1x(profile)),
+                ==,
+                NM_SETTING_802_1X_CK_SCHEME_SERVER_HASH);
+        } else {
+            g_assert_cmpint(decision, ==, NM_TOFU_CONNECTION_DECISION_REJECT_DELETE);
+            g_assert_cmpint(
+                nm_setting_802_1x_get_ca_cert_scheme(nm_connection_get_setting_802_1x(profile)),
+                ==,
+                NM_SETTING_802_1X_CK_SCHEME_UNKNOWN);
+        }
+    }
+    g_assert_cmpuint(data.requests, ==, 2);
+
+    g_main_loop_unref(data.loop);
+    g_dbus_connection_unregister_object(bus, registration_id);
+    nm_tofu_session_reset(nm_tofu_session_get());
+    g_dbus_connection_close_sync(bus, NULL, NULL);
+    g_test_dbus_down(test_bus);
+    g_dbus_node_info_unref(node_info);
+    nmtst_logging_reenable(logging);
+}
+
 /*****************************************************************************/
 
 NMTST_DEFINE();
@@ -1707,6 +2020,10 @@ main(int argc, char **argv)
     g_test_add_func("/wifi/wps_key_to_psk", test_wps_key_to_psk);
 
     g_test_add_func("/wifi/ap/check_compatible_band", test_ap_check_compatible_band);
+    g_test_add_func("/wifi/tofu/prepare", test_tofu_prepare);
+    g_test_add_func("/wifi/tofu/profile-pin", test_tofu_profile_pin);
+    g_test_add_func("/wifi/tofu/decision", test_tofu_decision);
+    g_test_add_func("/wifi/tofu/agent-request", test_tofu_agent_request);
 
     return g_test_run();
 }

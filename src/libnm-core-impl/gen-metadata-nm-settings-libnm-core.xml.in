@@ -285,6 +285,10 @@
                   dbus-type="s"
                   gprop-type="gchararray"
                   />
+        <property name="ca-verify-mode"
+                  dbus-type="i"
+                  gprop-type="gint"
+                  />
         <property name="client-cert"
                   dbus-type="ay"
                   gprop-type="GBytes"

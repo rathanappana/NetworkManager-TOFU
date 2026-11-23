@@ -1,0 +1,76 @@
+sequenceDiagram
+    autonumber
+    participant Dev as NMDeviceWifi
+    participant Conn as NMToFuConnection
+    participant Sess as NMToFuSession (Singleton)
+    participant Sup as wpa_supplicant (DBus)
+    participant Agent as SecretAgent (UI)
+    participant PK as Polkit
+    participant Sett as NMSettings
+
+    Note over Dev, Sett: Stage 1: Setup & Activation
+    Dev->>Conn: nm_tofu_connection_setup(req, cancellable)
+    Conn->>Sess: nm_tofu_session_set(ssid, uuid, subject)
+    Conn->>Conn: Create GTask & Bind GCancellable to Dev state
+    Conn->>Sess: Connect to "stage3-ready" signal
+    Dev->>Sup: Request Association (EAP-TLS/PEAP/TTLS)
+
+    Note over Sup, Sess: Stage 2: Certificate Collection
+    loop TLS Handshake
+        Sup-->>Dev: Certification Signal (depth, hash, cert)
+        Dev->>Sess: nm_tofu_stage2_cert_signal()
+        Sess->>Sess: Deduplicate by (depth, hash)
+    end
+    
+    Sup-->>Dev: Certification Signal (depth == 0) [Leaf Cert]
+    Dev->>Sess: nm_tofu_stage2_cert_signal()
+    Sess->>Sess: tofu_resolve_self_signed_root()
+    Sess->>Sess: Check System Trust Store
+    Sess->>Conn: emit "stage3-ready"
+
+    Note over Conn, Agent: Stage 3: Dispatch & UI Prompt
+    Conn->>Conn: tofu_on_stage3_ready()
+    Conn->>Conn: tofu_certificate_agent_pick()
+    Conn->>Dev: Disconnect GCancellable State Watcher
+    Conn->>Dev: nm_tofu_deauthenticate_connection_by_uuid()
+    Conn->>Sett: set_autoconnect(FALSE, PERSIST_MODE_KEEP)
+    Conn->>Agent: DBus: CertificateVerificationRequest(cert_fields, disclaimer)
+
+    Note over Agent, PK: Stage 4: User Response & Authorization
+    alt User Clicks Disconnect / AP Drops
+        Dev->>Conn: State changes to DEACTIVATING
+        Conn->>Conn: g_cancellable_cancel()
+        Conn-->>Agent: DBus Call Aborted
+    else User Reviews Prompt
+        Agent-->>Conn: DBus Reply: Accepted (TRUE) or Rejected (FALSE)
+    end
+
+    Conn->>PK: tofu_polkit_check_modify() [modify.own or modify.system]
+    PK-->>Conn: on_polkit_check_cb(Authorized / Unauthorized)
+
+    Note over Conn, Sett: Stage 5: Persistence & Reactivation
+    alt User Accepted == TRUE
+        alt Authorized == TRUE
+            Conn->>Sett: tofu_update_ca_cert(PERSIST_MODE_TO_DISK)
+            Conn->>Sett: set_autoconnect(TRUE, PERSIST_MODE_TO_DISK)
+            Conn->>Dev: nm_manager_activate_connection() (Reactivate)
+        else Authorized == FALSE
+            Conn->>Sett: tofu_update_ca_cert_hash(PERSIST_MODE_IN_MEMORY_DETACHED)
+            Conn->>Sett: set_autoconnect(TRUE, PERSIST_MODE_IN_MEMORY_DETACHED)
+            Conn->>Dev: nm_manager_activate_connection() (Reactivate)
+            Conn->>Dev: g_object_set_data(new_ac, "tofu-temp-pin-uuid")
+            Conn->>Dev: g_signal_connect("notify::state", tofu_temp_pin_state_changed_cb)
+            Note over Dev, Sett: When Activation Settles (ACTIVATED or DEACTIVATED)
+            Dev->>Conn: tofu_temp_pin_state_changed_cb()
+            Conn->>Sett: tofu_revert_temporary_cert() (Wipes memory pin)
+        end
+    else User Rejected == FALSE
+        alt Authorized == TRUE
+            Conn->>Sett: tofu_remove_connection(uuid) (Delete Profile)
+        else Authorized == FALSE
+            Note over Conn: Leave profile intact (User lacks permission to delete)
+        end
+    end
+
+    Conn->>Sess: nm_tofu_session_reset() (Clear singletons)
+    Conn->>Conn: g_object_unref(GTask) (Free Context & Unhook signals)

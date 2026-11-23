@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<node name="/">
+
+  <!--
+      org.freedesktop.NetworkManager.CertificateAgent:
+      @short_description: TLS Certificate Verification Agent.
+
+      Private D-Bus interface implemented by certificate agents. NetworkManager
+      calls these methods to request user confirmation when a TLS server
+      certificate cannot be verified against a known CA (TOFU mode). The agent
+      should implement this D-Bus interface on an object at the path
+      /org/freedesktop/NetworkManager/CertificateAgent.
+  -->
+  <interface name="org.freedesktop.NetworkManager.CertificateAgent">
+
+    <!--
+        CertificateVerificationRequest:
+        @ssid: SSID of the network whose server certificate is being verified.
+        @certificate_name: Subject common name of the certificate.
+        @issuer_name: Common name of the certificate issuer.
+        @organization: Organization field from the certificate subject.
+        @sha256_hex: SHA-256 fingerprint of the certificate in hex.
+        @expiration_str: Certificate expiration date as a human-readable string.
+        @str_disclaimer: Disclaimer text to present to the user.
+        @best_url: Informational URL for the certificate or network.
+        @response: TRUE if the user accepts the certificate, FALSE to reject.
+
+        Called by NetworkManager to request user confirmation for an unverified
+        TLS server certificate. The agent presents UI and returns the user's
+        decision. If the agent does not reply within NM's timeout, NM treats
+        the certificate as rejected.
+    -->
+    <method name="CertificateVerificationRequest">
+      <arg name="ssid"            type="s" direction="in"/>
+      <arg name="certificate_name" type="s" direction="in"/>
+      <arg name="issuer_name"     type="s" direction="in"/>
+      <arg name="organization"    type="s" direction="in"/>
+      <arg name="sha256_hex"      type="s" direction="in"/>
+      <arg name="expiration_str"  type="s" direction="in"/>
+      <arg name="str_disclaimer"  type="s" direction="in"/>
+      <arg name="best_url"        type="s" direction="in"/>
+      <arg name="response"        type="b" direction="out"/>
+    </method>
+
+    <!--
+        CertificateVerificationFailure:
+        @ssid: SSID of the network where certificate verification failed.
+        @error_message: Description of the verification failure.
+
+        Called by NetworkManager to notify the agent of a certificate
+        verification failure that did not involve a user prompt (e.g. a
+        previously trusted certificate no longer matches).
+    -->
+    <method name="CertificateVerificationFailure">
+      <arg name="ssid"          type="s" direction="in"/>
+      <arg name="error_message" type="s" direction="in"/>
+    </method>
+
+  </interface>
+</node>

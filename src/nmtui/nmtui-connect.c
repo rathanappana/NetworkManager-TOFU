@@ -25,6 +25,7 @@
 #include "libnmc-base/nm-vpn-helpers.h"
 #include "libnmc-base/nm-client-utils.h"
 #include "nmt-utils.h"
+#include "nmt-certificate-agent.h"
 
 static void
 secrets_requested(NMSecretAgentSimple *agent,
@@ -179,6 +180,8 @@ activate_connection(NMConnection *connection, NMDevice *device, NMObject *specif
     label = nmt_newt_label_new(_("Connecting..."));
     nmt_newt_form_set_content(form, label);
 
+    nmt_certificate_agent_register();
+
     agent = nm_secret_agent_simple_new("nmtui");
     if (agent) {
         if (connection) {
@@ -276,6 +279,8 @@ done:
     if (nmt_newt_widget_get_realized(NMT_NEWT_WIDGET(form)))
         nmt_newt_form_quit(form);
     g_object_unref(form);
+
+    nmt_certificate_agent_unregister();
 
     if (agent)
         nm_secret_agent_old_unregister(NM_SECRET_AGENT_OLD(agent), NULL, NULL);

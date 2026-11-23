@@ -37,6 +37,7 @@ executable(
     'nmt-page-vlan.c',
     'nmt-page-wifi.c',
     'nmt-page-wireguard.c',
+    'nmt-certificate-agent.c',
     'nmt-password-dialog.c',
     'nmt-password-fields.c',
     'nmt-route-editor.c',

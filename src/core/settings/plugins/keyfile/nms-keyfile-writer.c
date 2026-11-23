@@ -91,6 +91,11 @@ cert_writer(NMConnection                     *connection,
                                         setting_name,
                                         vtable->setting_key,
                                         vtable->uri_func(setting));
+    } else if (scheme == NM_SETTING_802_1X_CK_SCHEME_SERVER_HASH) {
+        nm_keyfile_plugin_kf_set_string(file,
+                                        setting_name,
+                                        vtable->setting_key,
+                                        vtable->uri_func(setting));
     } else if (scheme == NM_SETTING_802_1X_CK_SCHEME_BLOB) {
         GBytes       *blob;
         const guint8 *blob_data;
