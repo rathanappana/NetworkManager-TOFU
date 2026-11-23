@@ -8,6 +8,7 @@ test_units = [
   'test-dcb',
   'test-netns',
   'test-l3cfg',
+  'test-tofu',
   'test-utils',
   'test-wired-defname',
 ]
