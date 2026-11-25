@@ -65,7 +65,8 @@ gboolean nm_secret_agent_has_permission(NMSecretAgent *agent, const char *permis
 
 typedef void (*NMSecretAgentCallback)(NMSecretAgent       *agent,
                                       NMSecretAgentCallId *call_id,
-                                      GVariant            *new_secrets, /* NULL for save & delete */
+                                      GVariant            *new_secrets, /* NULL for save & delete,
+                                                                         * "(b)" for confirm-server-cert */
                                       GError              *error,
                                       gpointer             user_data);
 
@@ -89,6 +90,12 @@ NMSecretAgentCallId *nm_secret_agent_delete_secrets(NMSecretAgent        *agent,
                                                     NMConnection         *connection,
                                                     NMSecretAgentCallback callback,
                                                     gpointer              callback_data);
+
+NMSecretAgentCallId *nm_secret_agent_confirm_server_cert(NMSecretAgent        *self,
+                                                         const char           *path,
+                                                         GVariant             *certificate,
+                                                         NMSecretAgentCallback callback,
+                                                         gpointer              callback_data);
 
 void nm_secret_agent_cancel_call(NMSecretAgent *self, NMSecretAgentCallId *call_id);
 
