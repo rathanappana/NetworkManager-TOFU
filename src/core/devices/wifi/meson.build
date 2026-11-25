@@ -18,6 +18,7 @@ libnm_device_plugin_wifi_static = static_library(
     'nm-wifi-ap.c',
     'nm-wifi-common.c',
     'nm-wifi-p2p-peer.c',
+    'nm-wifi-tofu.c',
     'nm-wifi-utils.c',
   ) + iwd_sources,
   dependencies: [
