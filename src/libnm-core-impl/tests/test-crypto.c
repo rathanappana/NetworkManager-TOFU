@@ -416,6 +416,66 @@ test_crypto_error(void)
 
 /*****************************************************************************/
 
+static GPtrArray *
+_load_certificates(const char *file)
+{
+    gs_free char *path = g_build_filename(TEST_CERT_DIR, file, NULL);
+
+    return nm_crypto_load_x509_certificates(path);
+}
+
+static void
+test_x509_chain(void)
+{
+    gs_unref_ptrarray GPtrArray *root    = _load_certificates("test-tofu-root-ca.pem");
+    gs_unref_ptrarray GPtrArray *server  = _load_certificates("test-tofu-server.pem");
+    gs_unref_ptrarray GPtrArray *other   = _load_certificates("test-tofu-other-ca.pem");
+    gs_unref_ptrarray GPtrArray *chain   = g_ptr_array_new();
+    gs_unref_ptrarray GPtrArray *empty   = g_ptr_array_new();
+    gs_unref_ptrarray GPtrArray *anchors = g_ptr_array_new();
+    gs_unref_ptrarray GPtrArray *dir     = NULL;
+    gs_free_error GError        *error   = NULL;
+
+    g_assert_cmpint(root->len, ==, 1);
+    g_assert_cmpint(server->len, ==, 1);
+    g_assert_cmpint(other->len, ==, 1);
+
+    g_assert(nm_crypto_x509_is_self_issued(root->pdata[0]));
+    g_assert(nm_crypto_x509_is_self_issued(other->pdata[0]));
+    g_assert(!nm_crypto_x509_is_self_issued(server->pdata[0]));
+
+    /* the server certificate alone, and with its root */
+    g_ptr_array_add(chain, server->pdata[0]);
+    g_assert(nm_crypto_verify_x509_chain(chain, root, &error));
+    g_assert_no_error(error);
+    g_ptr_array_add(chain, root->pdata[0]);
+    g_assert(nm_crypto_verify_x509_chain(chain, root, &error));
+    g_assert_no_error(error);
+
+    /* another CA, even when the server sends the right root */
+    g_assert(!nm_crypto_verify_x509_chain(chain, other, &error));
+    g_assert(error);
+    g_clear_error(&error);
+    g_assert(!nm_crypto_verify_x509_chain(chain, empty, &error));
+    g_assert(error);
+    g_clear_error(&error);
+
+    /* the right one among others */
+    g_ptr_array_add(anchors, other->pdata[0]);
+    g_ptr_array_add(anchors, root->pdata[0]);
+    g_assert(nm_crypto_verify_x509_chain(chain, anchors, &error));
+    g_assert_no_error(error);
+
+    /* a CA certificate is not a TLS server certificate */
+    g_ptr_array_set_size(chain, 0);
+    g_ptr_array_add(chain, other->pdata[0]);
+    g_assert(!nm_crypto_verify_x509_chain(chain, root, NULL));
+
+    /* a directory of PEM and DER files: DER, PEM, bundle and the TOFU files */
+    dir = nm_crypto_load_x509_certificates(TEST_CERT_DIR);
+    g_assert_cmpint(dir->len, >=, 3);
+}
+
 NMTST_DEFINE();
 
 int
@@ -474,6 +534,7 @@ main(int argc, char **argv)
     g_test_add_data_func("/libnm/crypto/PKCS#8", "pkcs8-enc-key.pem, 1234567890", test_pkcs8);
 
     g_test_add_func("/libnm/crypto/md5", test_md5);
+    g_test_add_func("/libnm/crypto/x509-chain", test_x509_chain);
     g_test_add_func("/libnm/crypto/error", test_crypto_error);
 
     ret = g_test_run();

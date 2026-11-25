@@ -69,6 +69,22 @@ _nm_crypto_verify_x509(const guint8 *data, gsize len, GError **error)
 }
 
 gboolean
+_nm_crypto_x509_is_self_issued(const guint8 *data, gsize len)
+{
+    return FALSE;
+}
+
+gboolean
+_nm_crypto_verify_x509_chain(GPtrArray *chain, GPtrArray *anchors, GError **error)
+{
+    g_set_error(error,
+                _NM_CRYPTO_ERROR,
+                _NM_CRYPTO_ERROR_FAILED,
+                _("Compiled without crypto support."));
+    return FALSE;
+}
+
+gboolean
 _nm_crypto_verify_pkcs12(const guint8 *data, gsize data_len, const char *password, GError **error)
 {
     g_set_error(error,

@@ -288,6 +288,113 @@ _nm_crypto_verify_x509(const guint8 *data, gsize len, GError **error)
     return FALSE;
 }
 
+static gnutls_x509_crt_t
+_x509_import_der(const guint8 *data, gsize len)
+{
+    gnutls_x509_crt_t crt;
+    gnutls_datum_t    dt = {
+        .data = (unsigned char *) data,
+        .size = len,
+    };
+
+    if (gnutls_x509_crt_init(&crt) < 0)
+        return NULL;
+    if (gnutls_x509_crt_import(crt, &dt, GNUTLS_X509_FMT_DER) < 0) {
+        gnutls_x509_crt_deinit(crt);
+        return NULL;
+    }
+    return crt;
+}
+
+static gnutls_x509_crt_t
+_x509_import_bytes(GBytes *bytes)
+{
+    gsize         len;
+    const guint8 *data = g_bytes_get_data(bytes, &len);
+
+    return _x509_import_der(data, len);
+}
+
+gboolean
+_nm_crypto_x509_is_self_issued(const guint8 *data, gsize len)
+{
+    gnutls_x509_crt_t crt = _x509_import_der(data, len);
+    gboolean          self_issued;
+
+    if (!crt)
+        return FALSE;
+    self_issued = gnutls_x509_crt_check_issuer(crt, crt) != 0;
+    gnutls_x509_crt_deinit(crt);
+    return self_issued;
+}
+
+gboolean
+_nm_crypto_verify_x509_chain(GPtrArray *chain, GPtrArray *anchors, GError **error)
+{
+    gnutls_typed_vdata_st purpose = {
+        .type = GNUTLS_DT_KEY_PURPOSE_OID,
+        .data = (unsigned char *) GNUTLS_KP_TLS_WWW_SERVER,
+    };
+    gs_free gnutls_x509_crt_t *crts    = g_new0(gnutls_x509_crt_t, chain->len);
+    gnutls_x509_trust_list_t   list    = NULL;
+    gboolean                   success = FALSE;
+    unsigned                   status  = 0;
+    guint                      i;
+
+    for (i = 0; i < chain->len; i++) {
+        crts[i] = _x509_import_bytes(chain->pdata[i]);
+        if (!crts[i]) {
+            g_set_error_literal(error,
+                                _NM_CRYPTO_ERROR,
+                                _NM_CRYPTO_ERROR_INVALID_DATA,
+                                _("Couldn't decode certificate"));
+            goto out;
+        }
+    }
+
+    if (gnutls_x509_trust_list_init(&list, 0) < 0) {
+        g_set_error_literal(error,
+                            _NM_CRYPTO_ERROR,
+                            _NM_CRYPTO_ERROR_FAILED,
+                            _("Failed to initialize the trust list"));
+        goto out;
+    }
+
+    for (i = 0; i < anchors->len; i++) {
+        gnutls_x509_crt_t crt = _x509_import_bytes(anchors->pdata[i]);
+
+        /* The trust list takes ownership of the added certificate. */
+        if (crt && gnutls_x509_trust_list_add_cas(list, &crt, 1, 0) != 1)
+            gnutls_x509_crt_deinit(crt);
+    }
+
+    if (gnutls_x509_trust_list_verify_crt2(list, crts, chain->len, &purpose, 1, 0, &status, NULL)
+            < 0
+        || status != 0) {
+        gnutls_datum_t reason = {};
+
+        gnutls_certificate_verification_status_print(status, GNUTLS_CRT_X509, &reason, 0);
+        g_set_error(error,
+                    _NM_CRYPTO_ERROR,
+                    _NM_CRYPTO_ERROR_FAILED,
+                    _("The certificate chain does not verify: %s"),
+                    reason.data ? (const char *) reason.data : "");
+        gnutls_free(reason.data);
+        goto out;
+    }
+
+    success = TRUE;
+
+out:
+    if (list)
+        gnutls_x509_trust_list_deinit(list, TRUE);
+    for (i = 0; i < chain->len; i++) {
+        if (crts[i])
+            gnutls_x509_crt_deinit(crts[i]);
+    }
+    return success;
+}
+
 gboolean
 _nm_crypto_verify_pkcs12(const guint8 *data, gsize data_len, const char *password, GError **error)
 {
