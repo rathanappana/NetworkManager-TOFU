@@ -368,14 +368,24 @@ _dbus_call_cb(GObject *source, GAsyncResult *result, gpointer user_data)
 
     ret = g_dbus_connection_call_finish(G_DBUS_CONNECTION(source), result, &error);
 
-    if (!ret && nm_utils_error_is_cancelled(error))
+    /* Only a local cancellation frees the call-id. An agent may reply with
+     * an error that GDBus maps to G_IO_ERROR_CANCELLED too. */
+    if (!ret && nm_utils_error_is_cancelled(error) && !g_dbus_error_is_remote_error(error))
         return;
 
     call_id = user_data;
 
-    if (!ret)
-        g_dbus_error_strip_remote_error(error);
-    else {
+    if (!ret) {
+        if (nm_utils_error_is_cancelled(error)) {
+            /* Callers take a cancelled error for their own cancellation. */
+            g_clear_error(&error);
+            g_set_error_literal(&error,
+                                NM_SECRET_AGENT_ERROR,
+                                NM_SECRET_AGENT_ERROR_FAILED,
+                                "the agent cancelled the request");
+        } else
+            g_dbus_error_strip_remote_error(error);
+    } else {
         if (nm_streq(call_id->method_name, METHOD_GET_SECRETS)) {
             g_variant_get(ret, "(@a{sa{sv}})", &secrets);
         }
