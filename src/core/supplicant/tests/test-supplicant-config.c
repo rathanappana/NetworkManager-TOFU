@@ -1174,6 +1174,22 @@ test_8021x_server_cert_probe(void)
         g_assert(validate_opt("probe", dict, "ca_cert", NM_SUPPL_OPT_TYPE_BYTES, expected));
     }
 
+    /* Wired 802.1X cannot probe, so it must not connect unverified. */
+    {
+        gs_unref_object NMSupplicantConfig *config  = NULL;
+        gs_unref_object NMSetting8021x     *s_8021x = NULL;
+        gs_free_error GError               *error   = NULL;
+
+        s_8021x = NM_SETTING_802_1X(nm_setting_802_1x_new());
+        nm_setting_802_1x_add_eap_method(s_8021x, "peap");
+        g_object_set(s_8021x, NM_SETTING_802_1X_TRUST_ON_FIRST_USE, TRUE, NULL);
+
+        config = nm_supplicant_config_new(NM_SUPPL_CAP_MASK_NONE, NULL);
+        g_assert(
+            !nm_supplicant_config_add_setting_8021x(config, s_8021x, uuid, 0, TRUE, NULL, &error));
+        g_assert_error(error, NM_SUPPLICANT_ERROR, NM_SUPPLICANT_ERROR_CONFIG);
+    }
+
     /* A configured CA certificate is never replaced by the probe. */
     {
         gs_unref_object NMSupplicantConfig *config  = NULL;
