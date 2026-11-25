@@ -69,6 +69,7 @@ enum {
     FIND_STOPPED,    /* the P2P find operation stopped */
     PSK_MISMATCH,    /* supplicant reported incorrect PSK */
     SAE_MISMATCH,    /* supplicant reported incorrect SAE Password */
+    CERTIFICATION,   /* supplicant received a certificate of the EAP server */
     LAST_SIGNAL
 };
 
@@ -3318,6 +3319,17 @@ _signal_handle(NMSupplicantInterface *self,
             return;
         }
 
+        if (nm_streq(signal_name, "Certification")) {
+            gs_unref_variant GVariant *props = NULL;
+
+            if (!g_variant_is_of_type(parameters, G_VARIANT_TYPE("(a{sv})")))
+                return;
+
+            g_variant_get(parameters, "(@a{sv})", &props);
+            g_signal_emit(self, signals[CERTIFICATION], 0, props);
+            return;
+        }
+
         if (nm_streq(signal_name, "EAP")) {
             NMSupplicantAuthState auth_state = NM_SUPPLICANT_AUTH_STATE_UNKNOWN;
             const char           *status;
@@ -3974,6 +3986,17 @@ nm_supplicant_interface_class_init(NMSupplicantInterfaceClass *klass)
                                             G_TYPE_NONE,
                                             1,
                                             G_TYPE_VARIANT);
+
+    signals[CERTIFICATION] = g_signal_new(NM_SUPPLICANT_INTERFACE_CERTIFICATION,
+                                          G_OBJECT_CLASS_TYPE(object_class),
+                                          G_SIGNAL_RUN_LAST,
+                                          0,
+                                          NULL,
+                                          NULL,
+                                          NULL,
+                                          G_TYPE_NONE,
+                                          1,
+                                          G_TYPE_VARIANT);
 
     signals[GROUP_STARTED] = g_signal_new(NM_SUPPLICANT_INTERFACE_GROUP_STARTED,
                                           G_OBJECT_CLASS_TYPE(object_class),
