@@ -448,6 +448,48 @@ test_8021x_cert(void)
 }
 
 static void
+test_8021x_trust_on_first_use(void)
+{
+    gs_unref_object NMConnection   *con     = NULL;
+    nm_auto_unref_keyfile GKeyFile *keyfile = NULL;
+    NMSetting8021x                 *s_8021x;
+
+    con = nmtst_create_minimal_connection("test-tofu", NULL, NM_SETTING_WIRED_SETTING_NAME, NULL);
+    s_8021x = NM_SETTING_802_1X(nm_setting_802_1x_new());
+    nm_setting_802_1x_add_eap_method(s_8021x, "peap");
+    g_object_set(s_8021x,
+                 NM_SETTING_802_1X_IDENTITY,
+                 "bob",
+                 NM_SETTING_802_1X_PHASE2_AUTH,
+                 "mschapv2",
+                 NM_SETTING_802_1X_TRUST_ON_FIRST_USE,
+                 TRUE,
+                 NULL);
+    nm_connection_add_setting(con, NM_SETTING(s_8021x));
+    nmtst_connection_normalize(con);
+
+    _keyfile_convert(&con, &keyfile, "/test_8021x_tofu/test", NULL, NULL, NULL, NULL, FALSE);
+    g_assert(g_key_file_get_boolean(keyfile, "802-1x", "trust-on-first-use", NULL));
+
+    /* the pin is stored next to it, without losing trust-on-first-use */
+    g_object_set(nm_connection_get_setting_802_1x(con),
+                 NM_SETTING_802_1X_SERVER_CERT_HASH,
+                 "00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:"
+                 "00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF",
+                 NULL);
+    nm_clear_pointer(&keyfile, g_key_file_unref);
+    _keyfile_convert(&con, &keyfile, "/test_8021x_tofu/test", NULL, NULL, NULL, NULL, FALSE);
+    g_assert(g_key_file_get_boolean(keyfile, "802-1x", "trust-on-first-use", NULL));
+    g_assert(g_key_file_has_key(keyfile, "802-1x", "server-cert-hash", NULL));
+
+    g_clear_object(&con);
+    _keyfile_convert(&con, &keyfile, "/test_8021x_tofu/test", NULL, NULL, NULL, NULL, FALSE);
+    s_8021x = nm_connection_get_setting_802_1x(con);
+    g_assert(nm_setting_802_1x_get_trust_on_first_use(s_8021x));
+    g_assert(!_nm_setting_802_1x_needs_trust_on_first_use(s_8021x));
+}
+
+static void
 test_8021x_cert_tpm2key(void)
 {
     _test_8021x_cert_from_files(TEST_WIRED_TLS_CA_CERT, TEST_WIRED_TLS_TPM2KEY);
@@ -993,6 +1035,7 @@ main(int argc, char **argv)
     g_test_add_func("/core/keyfile/encode_key", test_encode_key);
     g_test_add_func("/core/keyfile/test_8021x_cert", test_8021x_cert);
     g_test_add_func("/core/keyfile/test_8021x_cert_tpm2key", test_8021x_cert_tpm2key);
+    g_test_add_func("/core/keyfile/test_8021x_trust_on_first_use", test_8021x_trust_on_first_use);
     g_test_add_func("/core/keyfile/test_8021x_cert_read", test_8021x_cert_read);
     g_test_add_func("/core/keyfile/test_team_conf_read/valid", test_team_conf_read_valid);
     g_test_add_func("/core/keyfile/test_team_conf_read/invalid", test_team_conf_read_invalid);

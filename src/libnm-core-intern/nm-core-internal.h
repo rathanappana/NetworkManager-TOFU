@@ -1064,6 +1064,8 @@ gboolean _nm_setting_diff(NMConnection         *con_a,
 
 NMSetting8021xCKScheme _nm_setting_802_1x_cert_get_scheme(GBytes *bytes, GError **error);
 
+gboolean _nm_setting_802_1x_needs_trust_on_first_use(NMSetting8021x *setting);
+
 GBytes *_nm_setting_802_1x_cert_value_to_bytes(NMSetting8021xCKScheme scheme,
                                                const guint8          *val_bin,
                                                gssize                 val_len,
