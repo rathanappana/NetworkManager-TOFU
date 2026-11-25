@@ -60,16 +60,17 @@ typedef struct _AddNetworkData {
 } AddNetworkData;
 
 enum {
-    STATE,           /* change in the interface's state */
-    BSS_CHANGED,     /* a new BSS appeared, was updated, or was removed. */
-    PEER_CHANGED,    /* a new Peer appeared, was updated, or was removed */
-    WPS_CREDENTIALS, /* WPS credentials received */
-    GROUP_STARTED,   /* a new Group (interface) was created */
-    GROUP_FINISHED,  /* a Group (interface) has been finished */
-    FIND_STOPPED,    /* the P2P find operation stopped */
-    PSK_MISMATCH,    /* supplicant reported incorrect PSK */
-    SAE_MISMATCH,    /* supplicant reported incorrect SAE Password */
-    CERTIFICATION,   /* supplicant received a certificate of the EAP server */
+    STATE,                /* change in the interface's state */
+    BSS_CHANGED,          /* a new BSS appeared, was updated, or was removed. */
+    PEER_CHANGED,         /* a new Peer appeared, was updated, or was removed */
+    WPS_CREDENTIALS,      /* WPS credentials received */
+    GROUP_STARTED,        /* a new Group (interface) was created */
+    GROUP_FINISHED,       /* a Group (interface) has been finished */
+    FIND_STOPPED,         /* the P2P find operation stopped */
+    PSK_MISMATCH,         /* supplicant reported incorrect PSK */
+    SAE_MISMATCH,         /* supplicant reported incorrect SAE Password */
+    CERTIFICATION,        /* supplicant received a certificate of the EAP server */
+    SERVER_CERT_REJECTED, /* supplicant did not accept the certificate of the EAP server */
     LAST_SIGNAL
 };
 
@@ -3340,6 +3341,12 @@ _signal_handle(NMSupplicantInterface *self,
 
             g_variant_get(parameters, "(&s&s)", &status, &parameter);
 
+            if (nm_streq(status, "remote certificate verification")
+                && !nm_streq(parameter, "success")) {
+                g_signal_emit(self, signals[SERVER_CERT_REJECTED], 0, parameter);
+                return;
+            }
+
             if (nm_streq(status, "started"))
                 auth_state = NM_SUPPLICANT_AUTH_STATE_STARTED;
             else if (nm_streq(status, "completion")) {
@@ -3997,6 +4004,17 @@ nm_supplicant_interface_class_init(NMSupplicantInterfaceClass *klass)
                                           G_TYPE_NONE,
                                           1,
                                           G_TYPE_VARIANT);
+
+    signals[SERVER_CERT_REJECTED] = g_signal_new(NM_SUPPLICANT_INTERFACE_SERVER_CERT_REJECTED,
+                                                 G_OBJECT_CLASS_TYPE(object_class),
+                                                 G_SIGNAL_RUN_LAST,
+                                                 0,
+                                                 NULL,
+                                                 NULL,
+                                                 NULL,
+                                                 G_TYPE_NONE,
+                                                 1,
+                                                 G_TYPE_STRING);
 
     signals[GROUP_STARTED] = g_signal_new(NM_SUPPLICANT_INTERFACE_GROUP_STARTED,
                                           G_OBJECT_CLASS_TYPE(object_class),

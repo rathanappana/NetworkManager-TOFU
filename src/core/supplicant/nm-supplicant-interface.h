@@ -80,16 +80,17 @@ typedef enum {
 #define NM_SUPPLICANT_INTERFACE_P2P_AVAILABLE      "p2p-available"
 #define NM_SUPPLICANT_INTERFACE_AUTH_STATE         "auth-state"
 
-#define NM_SUPPLICANT_INTERFACE_STATE           "state"
-#define NM_SUPPLICANT_INTERFACE_BSS_CHANGED     "bss-changed"
-#define NM_SUPPLICANT_INTERFACE_PEER_CHANGED    "peer-changed"
-#define NM_SUPPLICANT_INTERFACE_WPS_CREDENTIALS "wps-credentials"
-#define NM_SUPPLICANT_INTERFACE_GROUP_STARTED   "group-started"
-#define NM_SUPPLICANT_INTERFACE_GROUP_FINISHED  "group-finished"
-#define NM_SUPPLICANT_INTERFACE_FIND_STOPPED    "find-stopped"
-#define NM_SUPPLICANT_INTERFACE_PSK_MISMATCH    "wpa-psk-mismatch"
-#define NM_SUPPLICANT_INTERFACE_SAE_MISMATCH    "wpa-sae-password-mismatch"
-#define NM_SUPPLICANT_INTERFACE_CERTIFICATION   "certification"
+#define NM_SUPPLICANT_INTERFACE_STATE                "state"
+#define NM_SUPPLICANT_INTERFACE_BSS_CHANGED          "bss-changed"
+#define NM_SUPPLICANT_INTERFACE_PEER_CHANGED         "peer-changed"
+#define NM_SUPPLICANT_INTERFACE_WPS_CREDENTIALS      "wps-credentials"
+#define NM_SUPPLICANT_INTERFACE_GROUP_STARTED        "group-started"
+#define NM_SUPPLICANT_INTERFACE_GROUP_FINISHED       "group-finished"
+#define NM_SUPPLICANT_INTERFACE_FIND_STOPPED         "find-stopped"
+#define NM_SUPPLICANT_INTERFACE_PSK_MISMATCH         "wpa-psk-mismatch"
+#define NM_SUPPLICANT_INTERFACE_SAE_MISMATCH         "wpa-sae-password-mismatch"
+#define NM_SUPPLICANT_INTERFACE_CERTIFICATION        "certification"
+#define NM_SUPPLICANT_INTERFACE_SERVER_CERT_REJECTED "server-cert-rejected"
 
 typedef struct _NMSupplicantInterfaceClass NMSupplicantInterfaceClass;
 
