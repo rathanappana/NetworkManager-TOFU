@@ -25,6 +25,7 @@
 #include "libnmc-base/nm-vpn-helpers.h"
 #include "libnmc-base/nm-client-utils.h"
 #include "nmt-utils.h"
+#include "nmt-certificate-agent.h"
 
 static void
 secrets_requested(NMSecretAgentSimple *agent,
@@ -172,15 +173,20 @@ activate_connection(NMConnection *connection, NMDevice *device, NMObject *specif
     NmtSyncOp                            op;
     const char                          *specific_object_path;
     NMActiveConnection                  *ac;
-    GError                              *error = NULL;
-    ActivateConnectionInfo               info  = {};
+    GError                              *error         = NULL;
+    ActivateConnectionInfo               info          = {};
+    guint                                cert_agent_id = 0;
 
     form  = g_object_new(NMT_TYPE_NEWT_FORM, NULL);
     label = nmt_newt_label_new(_("Connecting..."));
     nmt_newt_form_set_content(form, label);
 
-    agent = nm_secret_agent_simple_new("nmtui");
+    agent =
+        nm_secret_agent_simple_new_with_capabilities("nmtui",
+                                                     NM_SECRET_AGENT_CAPABILITY_TRUST_ON_FIRST_USE);
     if (agent) {
+        cert_agent_id = nmt_certificate_agent_export(
+            nm_secret_agent_old_get_dbus_connection(NM_SECRET_AGENT_OLD(agent)));
         if (connection) {
             nm_secret_agent_simple_enable(agent, nm_object_get_path(NM_OBJECT(connection)));
         }
@@ -277,8 +283,13 @@ done:
         nmt_newt_form_quit(form);
     g_object_unref(form);
 
-    if (agent)
+    if (agent) {
         nm_secret_agent_old_unregister(NM_SECRET_AGENT_OLD(agent), NULL, NULL);
+        if (cert_agent_id)
+            g_dbus_connection_unregister_object(
+                nm_secret_agent_old_get_dbus_connection(NM_SECRET_AGENT_OLD(agent)),
+                cert_agent_id);
+    }
 }
 
 static void
