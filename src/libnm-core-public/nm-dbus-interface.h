@@ -90,6 +90,9 @@
 #define NM_DBUS_INTERFACE_SECRET_AGENT NM_DBUS_INTERFACE ".SecretAgent"
 #define NM_DBUS_PATH_SECRET_AGENT      "/org/freedesktop/NetworkManager/SecretAgent"
 
+#define NM_DBUS_INTERFACE_CERTIFICATE_AGENT NM_DBUS_INTERFACE ".CertificateAgent"
+#define NM_DBUS_PATH_CERTIFICATE_AGENT      "/org/freedesktop/NetworkManager/CertificateAgent"
+
 #define NM_DBUS_INTERFACE_DNS_MANAGER "org.freedesktop.NetworkManager.DnsManager"
 #define NM_DBUS_PATH_DNS_MANAGER      "/org/freedesktop/NetworkManager/DnsManager"
 
@@ -978,16 +981,20 @@ typedef enum /*< flags >*/ {
  * @NM_SECRET_AGENT_CAPABILITY_NONE: the agent supports no special capabilities
  * @NM_SECRET_AGENT_CAPABILITY_VPN_HINTS: the agent supports passing hints to
  * VPN plugin authentication dialogs.
+ * @NM_SECRET_AGENT_CAPABILITY_TRUST_ON_FIRST_USE: the agent implements the
+ * org.freedesktop.NetworkManager.CertificateAgent interface to let the user
+ * trust 802.1X server certificates on first use. Since: 1.60.
  * @NM_SECRET_AGENT_CAPABILITY_LAST: bounds checking value; should not be used.
  *
  * #NMSecretAgentCapabilities indicate various capabilities of the agent.
  */
 typedef enum /*< flags >*/ {
-    NM_SECRET_AGENT_CAPABILITY_NONE      = 0x0,
-    NM_SECRET_AGENT_CAPABILITY_VPN_HINTS = 0x1,
+    NM_SECRET_AGENT_CAPABILITY_NONE               = 0x0,
+    NM_SECRET_AGENT_CAPABILITY_VPN_HINTS          = 0x1,
+    NM_SECRET_AGENT_CAPABILITY_TRUST_ON_FIRST_USE = 0x2,
 
     /* boundary value */
-    NM_SECRET_AGENT_CAPABILITY_LAST = NM_SECRET_AGENT_CAPABILITY_VPN_HINTS,
+    NM_SECRET_AGENT_CAPABILITY_LAST = NM_SECRET_AGENT_CAPABILITY_TRUST_ON_FIRST_USE,
 } NMSecretAgentCapabilities;
 
 #ifndef NM_VERSION_H
