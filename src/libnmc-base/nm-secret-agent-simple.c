@@ -1405,13 +1405,28 @@ nm_secret_agent_simple_init(NMSecretAgentSimple *agent)
 NMSecretAgentSimple *
 nm_secret_agent_simple_new(const char *name)
 {
+    return nm_secret_agent_simple_new_with_capabilities(name, NM_SECRET_AGENT_CAPABILITY_NONE);
+}
+
+/**
+ * nm_secret_agent_simple_new_with_capabilities:
+ * @name: the identifier of secret agent
+ * @capabilities: capabilities to register in addition to
+ *   %NM_SECRET_AGENT_CAPABILITY_VPN_HINTS. The caller must implement them.
+ *
+ * Like nm_secret_agent_simple_new().
+ */
+NMSecretAgentSimple *
+nm_secret_agent_simple_new_with_capabilities(const char               *name,
+                                             NMSecretAgentCapabilities capabilities)
+{
     return g_initable_new(NM_TYPE_SECRET_AGENT_SIMPLE,
                           NULL,
                           NULL,
                           NM_SECRET_AGENT_OLD_IDENTIFIER,
                           name,
                           NM_SECRET_AGENT_OLD_CAPABILITIES,
-                          NM_SECRET_AGENT_CAPABILITY_VPN_HINTS,
+                          NM_SECRET_AGENT_CAPABILITY_VPN_HINTS | capabilities,
                           NULL);
 }
 
