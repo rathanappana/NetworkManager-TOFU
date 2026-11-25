@@ -357,6 +357,20 @@ eap_populate_advanced_tls_settings(EapMethod *method, NmtNewtWidget *subgrid)
 }
 
 static void
+eap_populate_trust_on_first_use(EapMethod *method, NmtNewtWidget *subgrid)
+{
+    NmtNewtWidget *widget;
+
+    widget = nmt_newt_checkbox_new(_("Trust server certificate on first use"));
+    g_object_bind_property(method->setting,
+                           NM_SETTING_802_1X_TRUST_ON_FIRST_USE,
+                           widget,
+                           "active",
+                           G_BINDING_SYNC_CREATE | G_BINDING_BIDIRECTIONAL);
+    nmt_editor_grid_append(NMT_EDITOR_GRID(subgrid), NULL, widget, NULL);
+}
+
+static void
 eap_method_populate_tls(EapMethod *method, NmtNewtWidget *subgrid)
 {
     NmtNewtWidget *widget;
@@ -399,6 +413,7 @@ eap_method_populate_tls(EapMethod *method, NmtNewtWidget *subgrid)
                            "password",
                            G_BINDING_SYNC_CREATE | G_BINDING_BIDIRECTIONAL);
     nmt_editor_grid_append(NMT_EDITOR_GRID(subgrid), _("CA cert password"), widget, NULL);
+    eap_populate_trust_on_first_use(method, subgrid);
 
     widget = nmt_newt_entry_new(40, NMT_NEWT_ENTRY_NONEMPTY);
     nmt_editor_grid_append(NMT_EDITOR_GRID(subgrid), _("User cert"), widget, NULL);
@@ -490,6 +505,7 @@ eap_method_populate_ttls(EapMethod *method, NmtNewtWidget *subgrid)
                            "password",
                            G_BINDING_SYNC_CREATE | G_BINDING_BIDIRECTIONAL);
     nmt_editor_grid_append(NMT_EDITOR_GRID(subgrid), _("CA cert password"), widget, NULL);
+    eap_populate_trust_on_first_use(method, subgrid);
 
     widget              = nmt_newt_popup_new(ttls_inner_methods);
     method->inner_popup = widget;
@@ -588,6 +604,7 @@ eap_method_populate_peap(EapMethod *method, NmtNewtWidget *subgrid)
                            "password",
                            G_BINDING_SYNC_CREATE | G_BINDING_BIDIRECTIONAL);
     nmt_editor_grid_append(NMT_EDITOR_GRID(subgrid), _("CA cert password"), widget, NULL);
+    eap_populate_trust_on_first_use(method, subgrid);
 
     widget = nmt_newt_popup_new(peap_version_entries);
     g_object_bind_property(method->setting,
