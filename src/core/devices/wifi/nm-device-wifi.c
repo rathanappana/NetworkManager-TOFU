@@ -118,7 +118,9 @@ typedef struct {
     guint sup_timeout_id; /* supplicant association timeout */
 
     /* Records the 802.1X server certificate of a trust-on-first-use profile. */
-    NMWifiTofu *tofu; /* while probing the 802.1X server certificate */
+    NMWifiTofu *tofu;                 /* while probing the 802.1X server certificate */
+    bool        tofu_reprobe : 1;     /* probe again: the trusted server was rejected */
+    bool        tofu_asked_again : 1; /* the user was asked about a changed certificate */
 
     _NMDeviceWifiCapabilities    capabilities;
     _NMSettingWirelessWakeOnWLan wowlan_restore;
@@ -999,6 +1001,8 @@ deactivate(NMDevice *device)
 
     nm_clear_g_source(&priv->periodic_update_id);
     nm_clear_g_source_inst(&priv->roam_supplicant_wait_source);
+    priv->tofu_asked_again = FALSE;
+    priv->tofu_reprobe     = FALSE;
 
     cleanup_association_attempt(self, TRUE);
 
@@ -3103,7 +3107,7 @@ tofu_confirm_cb(NMWifiTofu *tofu, gboolean trusted, GError *error, gpointer user
 }
 
 static void
-tofu_ask(NMDeviceWifi *self)
+tofu_ask(NMDeviceWifi *self, gboolean changed)
 {
     NMDeviceWifiPrivate *priv = NM_DEVICE_WIFI_GET_PRIVATE(self);
 
@@ -3113,7 +3117,7 @@ tofu_ask(NMDeviceWifi *self)
                             NM_DEVICE_STATE_REASON_NONE);
     nm_wifi_tofu_confirm(priv->tofu,
                          nm_device_get_act_request(NM_DEVICE(self)),
-                         FALSE,
+                         changed,
                          tofu_confirm_cb,
                          self);
 }
@@ -3140,26 +3144,48 @@ supplicant_iface_server_cert_rejected_cb(NMSupplicantInterface *iface,
 {
     NMDeviceWifiPrivate *priv   = NM_DEVICE_WIFI_GET_PRIVATE(self);
     NMDevice            *device = NM_DEVICE(self);
+    NMConnection        *connection;
+    NMSetting8021x      *s_8021x;
 
-    if (!priv->tofu || nm_device_get_state(device) != NM_DEVICE_STATE_CONFIG)
+    if (nm_device_get_state(device) != NM_DEVICE_STATE_CONFIG)
         return;
 
-    /* wpa_supplicant ends every probe by rejecting the server certificate. */
-    if (nm_streq(reason, "Server certificate chain probe")
-        && nm_wifi_tofu_has_server_cert(priv->tofu)) {
-        _LOGI(LOGD_DEVICE | LOGD_WIFI,
-              "Activation: (wifi) received the 802.1X server certificate, asking to trust it");
-        tofu_ask(self);
+    if (priv->tofu) {
+        /* wpa_supplicant ends every probe by rejecting the server certificate. */
+        if (nm_streq(reason, "Server certificate chain probe")
+            && nm_wifi_tofu_has_server_cert(priv->tofu)) {
+            _LOGI(LOGD_DEVICE | LOGD_WIFI,
+                  "Activation: (wifi) received the 802.1X server certificate, asking to trust it");
+            tofu_ask(self, priv->tofu_asked_again);
+            return;
+        }
+
+        _LOGW(LOGD_DEVICE | LOGD_WIFI,
+              "Activation: (wifi) the 802.1X server does not match the profile (%s)",
+              reason);
+        cleanup_association_attempt(self, TRUE);
+        nm_device_state_changed(device,
+                                NM_DEVICE_STATE_FAILED,
+                                NM_DEVICE_STATE_REASON_SUPPLICANT_FAILED);
         return;
     }
 
+    connection = nm_device_get_applied_connection(device);
+    s_8021x    = connection ? nm_connection_get_setting_802_1x(connection) : NULL;
+    if (!s_8021x || !nm_setting_802_1x_get_trust_on_first_use(s_8021x) || priv->tofu_asked_again)
+        return;
+
+    /* The rejection reports only part of the chain. Probe the server again,
+     * to show the user its whole chain. */
     _LOGW(LOGD_DEVICE | LOGD_WIFI,
-          "Activation: (wifi) the 802.1X server does not match the profile (%s)",
+          "Activation: (wifi) the trusted 802.1X server was rejected (%s), probing its new "
+          "certificate",
           reason);
+    priv->tofu_asked_again = TRUE;
+    priv->tofu_reprobe     = TRUE;
     cleanup_association_attempt(self, TRUE);
-    nm_device_state_changed(device,
-                            NM_DEVICE_STATE_FAILED,
-                            NM_DEVICE_STATE_REASON_SUPPLICANT_FAILED);
+    nm_device_state_changed(device, NM_DEVICE_STATE_NEED_AUTH, NM_DEVICE_STATE_REASON_NONE);
+    nm_device_activate_schedule_stage1_device_prepare(device, FALSE);
 }
 
 /*
@@ -3730,7 +3756,9 @@ act_stage2_config(NMDevice *device, NMDeviceStateReason *out_failure_reason)
     /* Probing the server certificate for trust on first use needs no secrets,
      * they are requested once the certificate is trusted. */
     tofu_probe =
-        _nm_setting_802_1x_needs_trust_on_first_use(nm_connection_get_setting_802_1x(connection));
+        _nm_setting_802_1x_needs_trust_on_first_use(nm_connection_get_setting_802_1x(connection))
+        || priv->tofu_reprobe;
+    priv->tofu_reprobe = FALSE;
 
     /* If we need secrets, get them */
     setting_name = tofu_probe ? NULL : nm_connection_need_secrets(connection, NULL);
@@ -3786,6 +3814,19 @@ act_stage2_config(NMDevice *device, NMDeviceStateReason *out_failure_reason)
 
         /* Not needed by the probe, which ends before any secret is used. */
         nm_connection_clear_secrets(probe);
+        /* Nor the trust that the server lost, when probing it again. */
+        g_object_set(nm_connection_get_setting_802_1x(probe),
+                     NM_SETTING_802_1X_CA_CERT,
+                     NULL,
+                     NM_SETTING_802_1X_CA_PATH,
+                     NULL,
+                     NM_SETTING_802_1X_SYSTEM_CA_CERTS,
+                     FALSE,
+                     NM_SETTING_802_1X_SERVER_CERT_HASH,
+                     NULL,
+                     NM_SETTING_802_1X_DOMAIN_MATCH,
+                     NULL,
+                     NULL);
         config = build_supplicant_config(self, sett_conn, probe, nm_wifi_ap_get_freq(ap), &error);
     } else {
         config =
