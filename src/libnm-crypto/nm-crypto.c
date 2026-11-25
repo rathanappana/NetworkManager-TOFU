@@ -895,6 +895,137 @@ nm_crypto_randomize(void *buffer, gsize buffer_len, GError **error)
     return _nm_crypto_randomize(buffer, buffer_len, error);
 }
 
+/*****************************************************************************/
+
+#define PEM_CERT_BEGIN "-----BEGIN CERTIFICATE-----"
+#define PEM_CERT_END   "-----END CERTIFICATE-----"
+
+static void
+_load_x509_file(GPtrArray *certificates, const char *filename)
+{
+    gs_free char *contents = NULL;
+    const char   *p;
+    gsize         len;
+
+    if (!g_file_get_contents(filename, &contents, &len, NULL))
+        return;
+
+    if (!strstr(contents, PEM_CERT_BEGIN)) {
+        if (_nm_crypto_verify_x509((const guint8 *) contents, len, NULL))
+            g_ptr_array_add(certificates, g_bytes_new(contents, len));
+        return;
+    }
+
+    /* A PEM file can contain several certificates, like a CA bundle. */
+    for (p = contents; (p = strstr(p, PEM_CERT_BEGIN));) {
+        gs_free char *base64 = NULL;
+        const char   *end;
+        guint8       *der;
+        gsize         der_len;
+
+        p += NM_STRLEN(PEM_CERT_BEGIN);
+        end = strstr(p, PEM_CERT_END);
+        if (!end)
+            break;
+
+        base64 = g_strndup(p, end - p);
+        der    = g_base64_decode(base64, &der_len);
+        if (der_len > 0)
+            g_ptr_array_add(certificates, g_bytes_new_take(der, der_len));
+        else
+            g_free(der);
+        p = end + NM_STRLEN(PEM_CERT_END);
+    }
+}
+
+/**
+ * nm_crypto_load_x509_certificates:
+ * @path: a certificate file, which may contain several PEM certificates,
+ *   or a directory of such files
+ *
+ * Returns: (transfer full): the DER encoded certificates found in @path.
+ *   Unreadable files and other data are skipped.
+ */
+GPtrArray *
+nm_crypto_load_x509_certificates(const char *path)
+{
+    GPtrArray  *certificates = g_ptr_array_new_with_free_func((GDestroyNotify) g_bytes_unref);
+    GDir       *dir;
+    const char *name;
+
+    if (!_nm_crypto_init(NULL))
+        return certificates;
+
+    dir = g_dir_open(path, 0, NULL);
+    if (!dir) {
+        _load_x509_file(certificates, path);
+        return certificates;
+    }
+
+    while ((name = g_dir_read_name(dir))) {
+        gs_free char *filename = NULL;
+
+        if (name[0] == '.')
+            continue;
+        filename = g_build_filename(path, name, NULL);
+        if (g_file_test(filename, G_FILE_TEST_IS_REGULAR))
+            _load_x509_file(certificates, filename);
+    }
+    g_dir_close(dir);
+    return certificates;
+}
+
+/**
+ * nm_crypto_x509_is_self_issued:
+ * @certificate: a DER encoded certificate
+ *
+ * Returns: %TRUE if the issuer of @certificate is its subject, like for a
+ *   root CA. The signature is not checked.
+ */
+gboolean
+nm_crypto_x509_is_self_issued(GBytes *certificate)
+{
+    gsize         len;
+    const guint8 *data = g_bytes_get_data(certificate, &len);
+
+    if (!_nm_crypto_init(NULL))
+        return FALSE;
+
+    return _nm_crypto_x509_is_self_issued(data, len);
+}
+
+/**
+ * nm_crypto_verify_x509_chain:
+ * @chain: DER encoded certificates, the TLS server certificate first,
+ *   followed by the certificates the server sent with it
+ * @anchors: DER encoded trusted certificates
+ * @error: location for the reason why the chain does not verify
+ *
+ * Verifies that @chain leads to one of @anchors and that its first
+ * certificate may be used by a TLS server, at the current time.
+ *
+ * Returns: %TRUE if the chain verifies.
+ */
+gboolean
+nm_crypto_verify_x509_chain(GPtrArray *chain, GPtrArray *anchors, GError **error)
+{
+    g_return_val_if_fail(chain && chain->len > 0, FALSE);
+    g_return_val_if_fail(anchors, FALSE);
+
+    if (!_nm_crypto_init(error))
+        return FALSE;
+
+    if (anchors->len == 0) {
+        g_set_error_literal(error,
+                            _NM_CRYPTO_ERROR,
+                            _NM_CRYPTO_ERROR_FAILED,
+                            _("No trusted certificates"));
+        return FALSE;
+    }
+
+    return _nm_crypto_verify_x509_chain(chain, anchors, error);
+}
+
 /**
  * nmtst_crypto_rsa_key_encrypt:
  * @data: (array length=len): RSA private key data to be encrypted

@@ -14,6 +14,7 @@ NM_PRAGMA_WARNING_DISABLE("-Wstrict-prototypes")
 #include <pk11pub.h>
 #include <pkcs11t.h>
 #include <cert.h>
+#include <certdb.h>
 #include <prerror.h>
 #include <p12.h>
 #include <ciferfam.h>
@@ -401,6 +402,101 @@ _nm_crypto_verify_x509(const guint8 *data, gsize len, GError **error)
     }
 
     CERT_DestroyCertificate(cert);
+    return TRUE;
+}
+
+gboolean
+_nm_crypto_x509_is_self_issued(const guint8 *data, gsize len)
+{
+    CERTCertificate *cert = CERT_DecodeCertFromPackage((char *) data, len);
+    gboolean         self_issued;
+
+    if (!cert)
+        return FALSE;
+    self_issued = SECITEM_CompareItem(&cert->derIssuer, &cert->derSubject) == SECEqual;
+    CERT_DestroyCertificate(cert);
+    return self_issued;
+}
+
+static CERTCertificate *
+_x509_new_temp_cert(GBytes *bytes)
+{
+    gsize   len;
+    SECItem item = {
+        .type = siDERCertBuffer,
+        .data = (unsigned char *) g_bytes_get_data(bytes, &len),
+    };
+
+    item.len = len;
+    return CERT_NewTempCertificate(CERT_GetDefaultCertDB(), &item, NULL, PR_FALSE, PR_TRUE);
+}
+
+gboolean
+_nm_crypto_verify_x509_chain(GPtrArray *chain, GPtrArray *anchors, GError **error)
+{
+    static const CERTCertTrust trusted     = {CERTDB_TRUSTED_CA | CERTDB_VALID_CA, 0, 0};
+    static const CERTCertTrust not_trusted = {
+        CERTDB_TERMINAL_RECORD,
+        CERTDB_TERMINAL_RECORD,
+        CERTDB_TERMINAL_RECORD,
+    };
+    CERTCertDBHandle            *db = CERT_GetDefaultCertDB();
+    gs_unref_ptrarray GPtrArray *certs =
+        g_ptr_array_new_with_free_func((GDestroyNotify) CERT_DestroyCertificate);
+    gs_unref_ptrarray GPtrArray *anchor_certs =
+        g_ptr_array_new_with_free_func((GDestroyNotify) CERT_DestroyCertificate);
+    CERTCertificate *cert;
+    SECStatus        status;
+    PRErrorCode      reason;
+    guint            i;
+
+    /* The certificates the server sent must exist while verifying, so that
+     * NSS finds them as intermediates. */
+    for (i = 0; i < chain->len; i++) {
+        cert = _x509_new_temp_cert(chain->pdata[i]);
+        if (!cert) {
+            g_set_error(error,
+                        _NM_CRYPTO_ERROR,
+                        _NM_CRYPTO_ERROR_INVALID_DATA,
+                        _("Couldn't decode certificate: %d"),
+                        PORT_GetError());
+            return FALSE;
+        }
+        g_ptr_array_add(certs, cert);
+    }
+
+    for (i = 0; i < anchors->len; i++) {
+        cert = _x509_new_temp_cert(anchors->pdata[i]);
+        if (cert && CERT_ChangeCertTrust(db, cert, (CERTCertTrust *) &trusted) == SECSuccess)
+            g_ptr_array_add(anchor_certs, cert);
+        else if (cert)
+            CERT_DestroyCertificate(cert);
+    }
+
+    status = CERT_VerifyCertificate(db,
+                                    certs->pdata[0],
+                                    PR_TRUE,
+                                    certificateUsageSSLServer,
+                                    PR_Now(),
+                                    NULL,
+                                    NULL,
+                                    NULL);
+    reason = PORT_GetError();
+
+    /* NSS keeps temporary certificates and their trust for the lifetime of
+     * the process. Withdraw the trust, so that it does not affect other
+     * verifications. */
+    for (i = 0; i < anchor_certs->len; i++)
+        CERT_ChangeCertTrust(db, anchor_certs->pdata[i], (CERTCertTrust *) &not_trusted);
+
+    if (status != SECSuccess) {
+        g_set_error(error,
+                    _NM_CRYPTO_ERROR,
+                    _NM_CRYPTO_ERROR_FAILED,
+                    _("The certificate chain does not verify: %s"),
+                    PR_ErrorToName(reason) ?: "");
+        return FALSE;
+    }
     return TRUE;
 }
 

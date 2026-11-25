@@ -66,6 +66,12 @@ NMCryptoFileFormat nm_crypto_verify_private_key(const char *file,
 
 gboolean nm_crypto_randomize(void *buffer, gsize buffer_len, GError **error);
 
+GPtrArray *nm_crypto_load_x509_certificates(const char *path);
+
+gboolean nm_crypto_x509_is_self_issued(GBytes *certificate);
+
+gboolean nm_crypto_verify_x509_chain(GPtrArray *chain, GPtrArray *anchors, GError **error);
+
 /*****************************************************************************/
 
 GBytes *nmtst_crypto_decrypt_openssl_private_key_data(const guint8    *data,
