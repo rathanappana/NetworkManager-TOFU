@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<node name="/">
+
+  <!--
+      org.freedesktop.NetworkManager.CertificateAgent:
+      @short_description: Server Certificate Agent.
+
+      Private D-Bus interface used by agents that let the user trust the
+      certificate of an 802.1X authentication server on first use (see the
+      "trust-on-first-use" property of the 802-1x setting). An agent
+      registers with the AgentManager like a secret agent, with the
+      NM_SECRET_AGENT_CAPABILITY_TRUST_ON_FIRST_USE capability, and
+      implements this interface on an object with the path
+      /org/freedesktop/NetworkManager/CertificateAgent of the same D-Bus
+      connection.
+  -->
+  <interface name="org.freedesktop.NetworkManager.CertificateAgent">
+
+    <!--
+        ConfirmServerCertificate:
+        @connection_path: Object path of the connection that is being activated.
+        @certificate: The server certificate as received from the network. Its values are chosen by the network and are not verified, except "system-trusted". Known keys are: "certificate" (ay, the DER encoding of the server certificate); "ca-certificates" (aay, the DER encoded certificates that the server sent with it, in the order of the chain); "fingerprint" (s, the SHA-256 fingerprint of the server certificate as colon-separated uppercase hex pairs); "subject" (s); "altsubject" (as, the subject alternative names, like "DNS:radius.example.com"); "system-trusted" (b, whether the certificates verify against the CA certificates of the system); "trust-anchor" (s, what is stored if the user trusts the certificate: "server-certificate" for its fingerprint, "root-ca" for the root CA that the server sent, or "system-ca" for the root CA among the CA certificates of the system that the chain leads to, the latter two together with the server name, so that the server can renew its certificate); "changed" (b, whether the server was trusted before and changed its certificate, which might also be an attack) and, for Wi-Fi, "ssid" (ay).
+        @trusted: Whether the user trusts the certificate.
+
+        Asks the user whether the server certificate can be trusted. If it is,
+        NetworkManager pins its fingerprint/CA in the connection and continues
+        the activation. Returning FALSE means that the user rejected it: the
+        activation fails and, if the connection was never trusted before, it
+        is deleted. If the user closes the dialog without deciding, the agent
+        returns the error org.freedesktop.NetworkManager.SecretAgent.UserCanceled:
+        the activation fails and the connection is kept.
+    -->
+    <method name="ConfirmServerCertificate">
+      <arg name="connection_path" type="o" direction="in"/>
+      <arg name="certificate" type="a{sv}" direction="in"/>
+      <arg name="trusted" type="b" direction="out"/>
+    </method>
+
+    <!--
+        CancelConfirmServerCertificate:
+        @connection_path: Object path of the connection.
+
+        Cancels a pending ConfirmServerCertificate request, for example
+        because the activation was aborted. The agent should close its
+        dialog. NetworkManager ignores the reply of the cancelled request.
+    -->
+    <method name="CancelConfirmServerCertificate">
+      <arg name="connection_path" type="o" direction="in"/>
+    </method>
+
+  </interface>
+</node>
