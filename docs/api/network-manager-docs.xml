@@ -273,6 +273,7 @@
       <title>Secret agents</title>
       <!-- TODO: Describe the secret agent here -->
       <xi:include href="dbus-org.freedesktop.NetworkManager.SecretAgent.xml"/>
+      <xi:include href="dbus-org.freedesktop.NetworkManager.CertificateAgent.xml"/>
     </chapter>
   </part>
 
