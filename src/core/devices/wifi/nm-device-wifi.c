@@ -39,6 +39,7 @@
 #include "settings/nm-settings.h"
 #include "nm-wifi-utils.h"
 #include "nm-wifi-common.h"
+#include "nm-wifi-tofu.h"
 #include "libnm-core-intern/nm-core-internal.h"
 #include "nm-config.h"
 
@@ -115,6 +116,9 @@ typedef struct {
     guint reacquire_iface_id;
     guint wps_timeout_id;
     guint sup_timeout_id; /* supplicant association timeout */
+
+    /* Records the 802.1X server certificate while probing it. */
+    NMWifiTofu *tofu;
 
     _NMDeviceWifiCapabilities    capabilities;
     _NMSettingWirelessWakeOnWLan wowlan_restore;
@@ -194,6 +198,10 @@ static void supplicant_iface_notify_p2p_available(NMSupplicantInterface *iface,
 
 static void supplicant_iface_notify_wpa_psk_mismatch_cb(NMSupplicantInterface *iface,
                                                         NMDeviceWifi          *self);
+
+static void supplicant_iface_certification_cb(NMSupplicantInterface *iface,
+                                              GVariant              *cert_info,
+                                              NMDeviceWifi          *self);
 
 static void supplicant_iface_notify_wpa_sae_mismatch_cb(NMSupplicantInterface *iface,
                                                         NMDeviceWifi          *self);
@@ -645,6 +653,10 @@ supplicant_interface_acquire_cb(NMSupplicantManager         *supplicant_manager,
     g_signal_connect(priv->sup_iface,
                      NM_SUPPLICANT_INTERFACE_SAE_MISMATCH,
                      G_CALLBACK(supplicant_iface_notify_wpa_sae_mismatch_cb),
+                     self);
+    g_signal_connect(priv->sup_iface,
+                     NM_SUPPLICANT_INTERFACE_CERTIFICATION,
+                     G_CALLBACK(supplicant_iface_certification_cb),
                      self);
 
     _scan_notify_is_scanning(self);
@@ -2444,6 +2456,7 @@ handle_8021x_or_psk_auth_fail(NMDeviceWifi              *self,
                               int                        disconnect_reason)
 {
     NMDevice                    *device = NM_DEVICE(self);
+    NMDeviceWifiPrivate         *priv   = NM_DEVICE_WIFI_GET_PRIVATE(self);
     NMActRequest                *req;
     const char                  *setting_name = NULL;
     NMSecretAgentGetSecretsFlags secret_flags = NM_SECRET_AGENT_GET_SECRETS_FLAG_ALLOW_INTERACTION
@@ -2458,6 +2471,18 @@ handle_8021x_or_psk_auth_fail(NMDeviceWifi              *self,
     g_return_val_if_fail(req != NULL, FALSE);
 
     if (need_new_8021x_secrets(self, old_state, &setting_name)) {
+        if (priv->tofu) {
+            /* The probe sends no secrets, asking for new ones cannot help. */
+            _LOGW(LOGD_DEVICE | LOGD_WIFI,
+                  "Activation: (wifi) 802.1X authentication failed before the server "
+                  "certificate was received");
+            cleanup_association_attempt(self, TRUE);
+            nm_device_state_changed(device,
+                                    NM_DEVICE_STATE_FAILED,
+                                    NM_DEVICE_STATE_REASON_SUPPLICANT_FAILED);
+            return TRUE;
+        }
+
         nm_act_request_clear_secrets(req);
 
         _LOGI(LOGD_DEVICE | LOGD_WIFI,
@@ -3036,6 +3061,73 @@ supplicant_iface_notify_wpa_sae_mismatch_cb(NMSupplicantInterface *iface, NMDevi
                                  | NM_SECRET_AGENT_GET_SECRETS_FLAG_REQUEST_NEW);
 }
 
+static void
+tofu_clear(NMDeviceWifi *self)
+{
+    NMDeviceWifiPrivate *priv = NM_DEVICE_WIFI_GET_PRIVATE(self);
+
+    nm_clear_pointer(&priv->tofu, nm_wifi_tofu_free);
+}
+
+static void
+tofu_confirm_cb(NMWifiTofu *tofu, gboolean trusted, GError *error, gpointer user_data)
+{
+    NMDeviceWifi        *self = user_data;
+    NMDeviceWifiPrivate *priv = NM_DEVICE_WIFI_GET_PRIVATE(self);
+
+    nm_assert(priv->tofu == tofu);
+    nm_assert(nm_device_get_state(NM_DEVICE(self)) == NM_DEVICE_STATE_NEED_AUTH);
+
+    tofu_clear(self);
+
+    if (!trusted) {
+        _LOGW(LOGD_DEVICE | LOGD_WIFI,
+              "Activation: (wifi) 802.1X server certificate not trusted: %s",
+              error->message);
+        nm_device_state_changed(NM_DEVICE(self),
+                                NM_DEVICE_STATE_FAILED,
+                                NM_DEVICE_STATE_REASON_NO_SECRETS);
+        return;
+    }
+
+    _LOGI(LOGD_DEVICE | LOGD_WIFI, "Activation: (wifi) 802.1X server certificate trusted");
+    nm_device_activate_schedule_stage1_device_prepare(NM_DEVICE(self), FALSE);
+}
+
+static void
+tofu_ask(NMDeviceWifi *self)
+{
+    NMDeviceWifiPrivate *priv = NM_DEVICE_WIFI_GET_PRIVATE(self);
+
+    cleanup_association_attempt(self, TRUE);
+    nm_device_state_changed(NM_DEVICE(self),
+                            NM_DEVICE_STATE_NEED_AUTH,
+                            NM_DEVICE_STATE_REASON_NONE);
+    nm_wifi_tofu_confirm(priv->tofu,
+                         nm_device_get_act_request(NM_DEVICE(self)),
+                         FALSE,
+                         tofu_confirm_cb,
+                         self);
+}
+
+static void
+supplicant_iface_certification_cb(NMSupplicantInterface *iface,
+                                  GVariant              *cert_info,
+                                  NMDeviceWifi          *self)
+{
+    NMDeviceWifiPrivate *priv = NM_DEVICE_WIFI_GET_PRIVATE(self);
+
+    if (!priv->tofu || nm_device_get_state(NM_DEVICE(self)) != NM_DEVICE_STATE_CONFIG)
+        return;
+
+    if (!nm_wifi_tofu_add_certificate(priv->tofu, cert_info))
+        return;
+
+    _LOGI(LOGD_DEVICE | LOGD_WIFI,
+          "Activation: (wifi) received the 802.1X server certificate, asking to trust it");
+    tofu_ask(self);
+}
+
 /*
  * supplicant_connection_timeout_cb
  *
@@ -3084,7 +3176,8 @@ supplicant_connection_timeout_cb(gpointer user_data)
 
     g_assert(priv->mode == _NM_802_11_MODE_INFRA);
 
-    if (priv->ssid_found && nm_connection_get_setting_wireless_security(connection)) {
+    if (priv->ssid_found && nm_connection_get_setting_wireless_security(connection)
+        && !priv->tofu) {
         guint64  timestamp   = 0;
         gboolean new_secrets = TRUE;
 
@@ -3575,10 +3668,12 @@ act_stage2_config(NMDevice *device, NMDeviceStateReason *out_failure_reason)
     NMActRequest                       *request;
     NMActiveConnection                 *controller_ac;
     NMDevice                           *controller;
+    gboolean                            tofu_probe;
 
     nm_clear_g_source(&priv->sup_timeout_id);
     nm_clear_g_source(&priv->link_timeout_id);
     nm_clear_g_source(&priv->wps_timeout_id);
+    tofu_clear(self);
 
     req = nm_device_get_act_request(device);
     g_return_val_if_fail(req, NM_ACT_STAGE_RETURN_FAILURE);
@@ -3598,8 +3693,13 @@ act_stage2_config(NMDevice *device, NMDeviceStateReason *out_failure_reason)
     s_wireless = nm_connection_get_setting_wireless(connection);
     nm_assert(s_wireless);
 
+    /* Probing the server certificate for trust on first use needs no secrets,
+     * they are requested once the certificate is trusted. */
+    tofu_probe =
+        _nm_setting_802_1x_needs_trust_on_first_use(nm_connection_get_setting_802_1x(connection));
+
     /* If we need secrets, get them */
-    setting_name = nm_connection_need_secrets(connection, NULL);
+    setting_name = tofu_probe ? NULL : nm_connection_need_secrets(connection, NULL);
     if (setting_name) {
         _LOGI(LOGD_DEVICE | LOGD_WIFI,
               "Activation: (wifi) access point '%s' has security, but secrets are required.",
@@ -3617,7 +3717,12 @@ act_stage2_config(NMDevice *device, NMDeviceStateReason *out_failure_reason)
         _LOGW(LOGD_DEVICE | LOGD_WIFI, "Cannot configure WoWLAN.");
 
     /* have secrets, or no secrets required */
-    if (nm_connection_get_setting_wireless_security(connection)) {
+    if (tofu_probe) {
+        _LOGI(LOGD_DEVICE | LOGD_WIFI,
+              "Activation: (wifi) connection '%s' trusts the 802.1X server on first use, "
+              "probing its certificate.",
+              nm_connection_get_id(connection));
+    } else if (nm_connection_get_setting_wireless_security(connection)) {
         _LOGI(LOGD_DEVICE | LOGD_WIFI,
               "Activation: (wifi) connection '%s' has security, and secrets exist.  No new secrets "
               "needed.",
@@ -3642,7 +3747,16 @@ act_stage2_config(NMDevice *device, NMDeviceStateReason *out_failure_reason)
         set_powersave(device);
 
     /* Build up the supplicant configuration */
-    config = build_supplicant_config(self, sett_conn, connection, nm_wifi_ap_get_freq(ap), &error);
+    if (tofu_probe) {
+        gs_unref_object NMConnection *probe = nm_simple_connection_new_clone(connection);
+
+        /* Not needed by the probe, which ends before any secret is used. */
+        nm_connection_clear_secrets(probe);
+        config = build_supplicant_config(self, sett_conn, probe, nm_wifi_ap_get_freq(ap), &error);
+    } else {
+        config =
+            build_supplicant_config(self, sett_conn, connection, nm_wifi_ap_get_freq(ap), &error);
+    }
     if (!config) {
         _LOGE(LOGD_DEVICE | LOGD_WIFI,
               "Activation: (wifi) couldn't build wireless configuration: %s",
@@ -3650,6 +3764,18 @@ act_stage2_config(NMDevice *device, NMDeviceStateReason *out_failure_reason)
         g_clear_error(&error);
         NM_SET_OUT(out_failure_reason, NM_DEVICE_STATE_REASON_SUPPLICANT_CONFIG_FAILED);
         goto out_fail;
+    }
+
+    if (tofu_probe) {
+        if (!nm_supplicant_config_add_server_cert_probe(config, &error)) {
+            _LOGE(LOGD_DEVICE | LOGD_WIFI,
+                  "Activation: (wifi) couldn't probe the 802.1X server certificate: %s",
+                  error->message);
+            g_clear_error(&error);
+            NM_SET_OUT(out_failure_reason, NM_DEVICE_STATE_REASON_SUPPLICANT_CONFIG_FAILED);
+            goto out_fail;
+        }
+        priv->tofu = nm_wifi_tofu_new(SYSTEM_CA_PATH);
     }
 
     /* Tell the supplicant in which bridge the interface is */
@@ -3796,6 +3922,10 @@ device_state_changed(NMDevice           *device,
 
     if (new_state > NM_DEVICE_STATE_ACTIVATED)
         wifi_secrets_cancel(self);
+
+    /* The server certificate only matters while authenticating. */
+    if (!NM_IN_SET(new_state, NM_DEVICE_STATE_CONFIG, NM_DEVICE_STATE_NEED_AUTH))
+        tofu_clear(self);
 
     if (new_state <= NM_DEVICE_STATE_UNAVAILABLE) {
         /* Clean up the supplicant interface because in these states the
@@ -4082,6 +4212,7 @@ dispose(GObject *object)
     nm_clear_g_source_inst(&priv->roam_supplicant_wait_source);
 
     wifi_secrets_cancel(self);
+    tofu_clear(self);
 
     cleanup_association_attempt(self, TRUE);
     supplicant_interface_release(self);
