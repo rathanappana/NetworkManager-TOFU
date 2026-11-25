@@ -2065,6 +2065,34 @@ nm_supplicant_config_add_setting_8021x(NMSupplicantConfig *self,
     return TRUE;
 }
 
+/**
+ * nm_supplicant_config_add_server_cert_probe:
+ * @self: the #NMSupplicantConfig, with no CA certificate configured
+ * @error: location for an error
+ *
+ * Makes wpa_supplicant only retrieve the certificate chain of the
+ * authentication server. It reports the certificates with the "Certification"
+ * signal and aborts the TLS handshake once it received the server
+ * certificate, so no credentials are sent to the (yet untrusted) server.
+ *
+ * Returns: %TRUE on success.
+ */
+gboolean
+nm_supplicant_config_add_server_cert_probe(NMSupplicantConfig *self, GError **error)
+{
+    g_return_val_if_fail(NM_IS_SUPPLICANT_CONFIG(self), FALSE);
+
+    if (g_hash_table_contains(NM_SUPPLICANT_CONFIG_GET_PRIVATE(self)->config, "ca_cert")) {
+        g_set_error_literal(error,
+                            NM_SUPPLICANT_ERROR,
+                            NM_SUPPLICANT_ERROR_CONFIG,
+                            "cannot probe the server certificate with a CA certificate set");
+        return FALSE;
+    }
+
+    return add_string_val(self, "probe://", "ca_cert", FALSE, NULL, error);
+}
+
 gboolean
 nm_supplicant_config_add_no_security(NMSupplicantConfig *self, GError **error)
 {
