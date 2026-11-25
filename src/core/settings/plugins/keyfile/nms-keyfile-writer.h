@@ -12,6 +12,9 @@
 typedef gboolean (*NMSKeyfileWriterAllowFilenameCb)(const char *check_filename,
                                                     gpointer    allow_filename_user_data);
 
+void
+nms_keyfile_writer_remove_cert_files(const char *keyfile_dir, const char *uuid, GKeyFile *keyfile);
+
 gboolean nms_keyfile_writer_connection(NMConnection                   *connection,
                                        gboolean                        is_nm_generated,
                                        gboolean                        is_volatile,

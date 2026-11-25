@@ -1844,17 +1844,30 @@ test_write_wired_8021x_tls_connection_blob(void)
     password_raw = nm_setting_802_1x_get_password_raw(s_8021x);
     g_assert(password_raw);
     g_assert(nm_g_bytes_equal_mem(password_raw, PASSWORD_RAW, NM_STRLEN(PASSWORD_RAW)));
+    g_clear_object(&reread);
 
+    /* Writing the profile again without the CA certificate removes its file,
+     * and keeps the files that are still used. */
     unlink(testfile);
+    nm_clear_g_free(&testfile);
+    nm_setting_802_1x_set_ca_cert(nm_connection_get_setting_802_1x(connection),
+                                  NULL,
+                                  NM_SETTING_802_1X_CK_SCHEME_BLOB,
+                                  NULL,
+                                  NULL);
+    write_test_connection_reread(connection, &testfile, &reread, &reread_same);
+    g_assert(!g_file_test(new_ca_cert, G_FILE_TEST_EXISTS));
+    g_assert(g_file_test(new_client_cert, G_FILE_TEST_EXISTS));
+    g_assert(g_file_test(new_priv_key, G_FILE_TEST_EXISTS));
 
-    /* Clean up written certs */
-    unlink(new_ca_cert);
+    /* Deleting the profile removes all of them. */
+    unlink(testfile);
+    nms_keyfile_writer_remove_cert_files(TEST_SCRATCH_DIR, uuid, NULL);
+    g_assert(!g_file_test(new_client_cert, G_FILE_TEST_EXISTS));
+    g_assert(!g_file_test(new_priv_key, G_FILE_TEST_EXISTS));
+
     g_free(new_ca_cert);
-
-    unlink(new_client_cert);
     g_free(new_client_cert);
-
-    unlink(new_priv_key);
     g_free(new_priv_key);
 }
 

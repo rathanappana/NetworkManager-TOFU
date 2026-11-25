@@ -165,6 +165,50 @@ cert_writer(NMConnection                     *connection,
     }
 }
 
+/**
+ * nms_keyfile_writer_remove_cert_files:
+ * @keyfile_dir: the directory of the keyfile
+ * @uuid: the UUID of the profile
+ * @keyfile: (nullable): the keyfile of the profile, whose files are kept
+ *
+ * Certificates and keys given as data are written to files named after the
+ * UUID of the profile, next to its keyfile. Removes those that @keyfile does
+ * not use, or all of them.
+ */
+void
+nms_keyfile_writer_remove_cert_files(const char *keyfile_dir, const char *uuid, GKeyFile *keyfile)
+{
+    static const char *const extensions[] = {"der", "pem", "p12"};
+    guint                    i;
+    guint                    j;
+
+    for (i = 0; i < _NM_SETTING_802_1X_SCHEME_TYPE_NUM; i++) {
+        const NMSetting8021xSchemeVtable *vtable = &nm_setting_8021x_scheme_vtable[i];
+        gs_free char                     *value  = NULL;
+        gs_free char                     *used   = NULL;
+
+        if (keyfile) {
+            value = nm_keyfile_plugin_kf_get_string(keyfile,
+                                                    NM_SETTING_802_1X_SETTING_NAME,
+                                                    vtable->setting_key,
+                                                    NULL);
+            if (value)
+                used = g_path_get_basename(value);
+        }
+
+        for (j = 0; j < G_N_ELEMENTS(extensions); j++) {
+            gs_free char *name =
+                g_strdup_printf("%s-%s.%s", uuid, vtable->file_suffix, extensions[j]);
+            gs_free char *path = NULL;
+
+            if (nm_streq0(name, used))
+                continue;
+            path = g_build_filename(keyfile_dir, name, NULL);
+            unlink(path);
+        }
+    }
+}
+
 static gboolean
 _handler_write(NMConnection         *connection,
                GKeyFile             *keyfile,
@@ -423,6 +467,10 @@ _internal_write_connection(NMConnection                   *connection,
      */
     if (existing_path && !existing_path_read_only && !nm_streq(path, existing_path))
         unlink(existing_path);
+
+    /* Remove the certificate files of data that the profile does not use
+     * anymore. */
+    nms_keyfile_writer_remove_cert_files(keyfile_dir, nm_connection_get_uuid(connection), kf_file);
 
     NM_SET_OUT(out_reread, g_steal_pointer(&reread));
     NM_SET_OUT(out_reread_same, reread_same);
