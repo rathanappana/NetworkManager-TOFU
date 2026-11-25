@@ -1143,6 +1143,62 @@ test_8021x_server_cert_hash(void)
     nmtst_logging_reenable(logging);
 }
 
+static void
+test_8021x_server_cert_probe(void)
+{
+    gs_free char *uuid    = nm_utils_uuid_generate();
+    gpointer      logging = nmtst_logging_disable(TRUE);
+
+    /* Without a CA, "probe://" makes wpa_supplicant only fetch the server
+     * certificate chain. Secrets that happen to be set are still configured
+     * but never used, because the TLS handshake is aborted. */
+    {
+        gs_unref_object NMSupplicantConfig *config   = NULL;
+        gs_unref_object NMSetting8021x     *s_8021x  = NULL;
+        gs_unref_variant GVariant          *dict     = NULL;
+        gs_unref_bytes GBytes              *expected = g_bytes_new_static("probe://", 8);
+        gs_free_error GError               *error    = NULL;
+
+        s_8021x = NM_SETTING_802_1X(nm_setting_802_1x_new());
+        nm_setting_802_1x_add_eap_method(s_8021x, "peap");
+        g_object_set(s_8021x, NM_SETTING_802_1X_IDENTITY, "bob", NULL);
+
+        config = nm_supplicant_config_new(NM_SUPPL_CAP_MASK_NONE, NULL);
+        g_assert(
+            nm_supplicant_config_add_setting_8021x(config, s_8021x, uuid, 0, FALSE, NULL, &error));
+        g_assert_no_error(error);
+        g_assert(nm_supplicant_config_add_server_cert_probe(config, &error));
+        g_assert_no_error(error);
+
+        dict = nm_supplicant_config_to_variant(config);
+        g_assert(validate_opt("probe", dict, "ca_cert", NM_SUPPL_OPT_TYPE_BYTES, expected));
+    }
+
+    /* A configured CA certificate is never replaced by the probe. */
+    {
+        gs_unref_object NMSupplicantConfig *config  = NULL;
+        gs_unref_object NMSetting8021x     *s_8021x = NULL;
+        gs_free_error GError               *error   = NULL;
+
+        s_8021x = NM_SETTING_802_1X(nm_setting_802_1x_new());
+        nm_setting_802_1x_add_eap_method(s_8021x, "peap");
+        g_assert(nm_setting_802_1x_set_ca_cert(s_8021x,
+                                               TEST_CERT_DIR "/test-ca-cert.pem",
+                                               NM_SETTING_802_1X_CK_SCHEME_PATH,
+                                               NULL,
+                                               NULL));
+
+        config = nm_supplicant_config_new(NM_SUPPL_CAP_MASK_NONE, NULL);
+        g_assert(
+            nm_supplicant_config_add_setting_8021x(config, s_8021x, uuid, 0, FALSE, NULL, &error));
+        g_assert_no_error(error);
+        g_assert(!nm_supplicant_config_add_server_cert_probe(config, &error));
+        g_assert_error(error, NM_SUPPLICANT_ERROR, NM_SUPPLICANT_ERROR_CONFIG);
+    }
+
+    nmtst_logging_reenable(logging);
+}
+
 /*****************************************************************************/
 
 static void
@@ -1205,6 +1261,7 @@ main(int argc, char **argv)
     g_test_add_func("/supplicant-config/8021x-ca-path-private-connection",
                     test_8021x_ca_path_private_connection);
     g_test_add_func("/supplicant-config/8021x-server-cert-hash", test_8021x_server_cert_hash);
+    g_test_add_func("/supplicant-config/8021x-server-cert-probe", test_8021x_server_cert_probe);
     g_test_add_func("/supplicant-config/8021x-peaplabel", test_8021x_peaplabel);
 
     return g_test_run();
