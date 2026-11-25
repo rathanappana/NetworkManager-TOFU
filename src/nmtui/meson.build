@@ -6,6 +6,7 @@ executable(
     'nm-editor-bindings.c',
     'nm-editor-utils.c',
     'nmt-8021x-fields.c',
+    'nmt-certificate-agent.c',
     'nmt-connect-connection-list.c',
     'nmt-device-entry.c',
     'nmt-edit-connection-list.c',

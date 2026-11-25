@@ -165,6 +165,7 @@ src/nmcli/utils.c
 src/nmcli/utils.h
 src/nmtui/nm-editor-utils.c
 src/nmtui/nmt-8021x-fields.c
+src/nmtui/nmt-certificate-agent.c
 src/nmtui/nmt-connect-connection-list.c
 src/nmtui/nmt-device-entry.c
 src/nmtui/nmt-edit-connection-list.c
