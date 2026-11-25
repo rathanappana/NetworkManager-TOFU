@@ -1466,6 +1466,17 @@ nm_supplicant_config_add_setting_8021x(NMSupplicantConfig *self,
 
     priv = NM_SUPPLICANT_CONFIG_GET_PRIVATE(self);
 
+    if (wired && _nm_setting_802_1x_needs_trust_on_first_use(setting)) {
+        /* Only Wi-Fi can probe the server certificate. Authenticating
+         * without verifying the server is not what the profile asks for. */
+        g_set_error_literal(error,
+                            NM_SUPPLICANT_ERROR,
+                            NM_SUPPLICANT_ERROR_CONFIG,
+                            "trust on first use of the server certificate is only supported "
+                            "for Wi-Fi");
+        return FALSE;
+    }
+
     value = nm_setting_802_1x_get_password(setting);
     if (value) {
         if (!add_string_val(self, value, "password", FALSE, "<hidden>", error))
