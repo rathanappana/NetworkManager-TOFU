@@ -8,6 +8,8 @@
 #include "devices/wifi/nm-wifi-utils.h"
 #include "devices/wifi/nm-wifi-ap.h"
 #include "devices/wifi/nm-device-wifi.h"
+#include "devices/wifi/nm-wifi-tofu.h"
+#include "libnm-crypto/nm-crypto.h"
 #include "libnm-core-intern/nm-core-internal.h"
 
 #include "nm-test-utils-core.h"
@@ -1558,6 +1560,262 @@ test_ap_check_compatible_band(void)
 
 /*****************************************************************************/
 
+/*****************************************************************************/
+
+static GVariant *
+_cert_info_bytes(guint32 depth, const char *subject, GBytes *cert, const char *const *altsubject)
+{
+    GVariantBuilder builder;
+
+    g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT);
+    g_variant_builder_add(&builder, "{sv}", "depth", g_variant_new_uint32(depth));
+    g_variant_builder_add(&builder, "{sv}", "subject", g_variant_new_string(subject));
+    if (altsubject)
+        g_variant_builder_add(&builder, "{sv}", "altsubject", g_variant_new_strv(altsubject, -1));
+    if (cert)
+        g_variant_builder_add(&builder, "{sv}", "cert", nm_g_bytes_to_variant_ay(cert));
+    return g_variant_ref_sink(g_variant_builder_end(&builder));
+}
+
+static GVariant *
+_cert_info(guint32 depth, const char *subject, const char *cert, const char *const *altsubject)
+{
+    gs_unref_bytes GBytes *bytes = cert ? g_bytes_new(cert, strlen(cert)) : NULL;
+
+    return _cert_info_bytes(depth, subject, bytes, altsubject);
+}
+
+static void
+test_tofu_certificate(void)
+{
+    nm_auto_free_wifi_tofu NMWifiTofu *tofu        = nm_wifi_tofu_new(NULL);
+    gs_unref_variant GVariant         *root        = NULL;
+    gs_unref_variant GVariant         *issuer      = NULL;
+    gs_unref_variant GVariant         *no_cert     = NULL;
+    gs_unref_variant GVariant         *server      = NULL;
+    gs_unref_variant GVariant         *server2     = NULL;
+    gs_unref_variant GVariant         *certificate = NULL;
+    gs_unref_variant GVariant         *der         = NULL;
+    gs_unref_variant GVariant         *cas         = NULL;
+    gs_unref_variant GVariant         *ssid        = NULL;
+    gs_unref_bytes GBytes             *ssid_bytes  = nmtst_gbytes_from_str("eduroam");
+    gs_free const char               **alt_out     = NULL;
+    const char *const                  alt[]       = {"DNS:radius.example.com", NULL};
+    const char                        *str;
+    gboolean                           b;
+    gsize                              len;
+
+    root    = _cert_info(2, "/O=Example/CN=Example Root CA", "root", NULL);
+    issuer  = _cert_info(1, "/C=BE/O=Example/CN=Example Issuing CA", "issuer", NULL);
+    no_cert = _cert_info(0, "/C=BE/O=Example Org/CN=radius.example.com", NULL, alt);
+    server  = _cert_info(0, "/C=BE/O=Example Org/CN=radius.example.com", "hello", alt);
+    server2 = _cert_info(0, "/CN=evil", "evil", NULL);
+
+    g_assert(!nm_wifi_tofu_add_certificate(tofu, root));
+    g_assert(!nm_wifi_tofu_add_certificate(tofu, issuer));
+    g_assert(!nm_wifi_tofu_add_certificate(tofu, no_cert));
+    g_assert(!nm_wifi_tofu_has_server_cert(tofu));
+    g_assert(nm_wifi_tofu_add_certificate(tofu, server));
+    g_assert(nm_wifi_tofu_has_server_cert(tofu));
+
+    /* only the first server certificate counts */
+    g_assert(!nm_wifi_tofu_add_certificate(tofu, server2));
+
+    /* these are no valid certificates, only the fingerprint can be trusted */
+    g_assert_cmpint(nm_wifi_tofu_get_trust_anchor(tofu), ==, NM_WIFI_TOFU_TRUST_ANCHOR_SERVER_CERT);
+
+    certificate = g_variant_ref_sink(nm_wifi_tofu_get_certificate(tofu, ssid_bytes, TRUE));
+    g_assert(g_variant_lookup(certificate, "fingerprint", "&s", &str));
+    g_assert_cmpstr(str,
+                    ==,
+                    "2C:F2:4D:BA:5F:B0:A3:0E:26:E8:3B:2A:C5:B9:E2:9E:1B:16:1E:5C:1F:A7:42:5E:73:04:"
+                    "33:62:93:8B:98:24");
+    g_assert(g_variant_lookup(certificate, "subject", "&s", &str));
+    g_assert_cmpstr(str, ==, "/C=BE/O=Example Org/CN=radius.example.com");
+    g_assert(g_variant_lookup(certificate, "altsubject", "^a&s", &alt_out));
+    g_assert(nm_strv_equal(alt_out, alt));
+    der = g_variant_lookup_value(certificate, "certificate", G_VARIANT_TYPE_BYTESTRING);
+    g_assert(der);
+    g_assert_cmpmem(g_variant_get_fixed_array(der, &len, 1), len, "hello", 5);
+    cas = g_variant_lookup_value(certificate, "ca-certificates", G_VARIANT_TYPE("aay"));
+    g_assert(cas);
+    g_assert_cmpint(g_variant_n_children(cas), ==, 2);
+    ssid = g_variant_lookup_value(certificate, "ssid", G_VARIANT_TYPE_BYTESTRING);
+    g_assert(ssid);
+    g_assert_cmpmem(g_variant_get_fixed_array(ssid, &len, 1), len, "eduroam", 7);
+    g_assert(g_variant_lookup(certificate, "system-trusted", "b", &b));
+    g_assert(!b);
+    g_assert(g_variant_lookup(certificate, "changed", "b", &b));
+    g_assert(b);
+    g_assert(g_variant_lookup(certificate, "trust-anchor", "&s", &str));
+    g_assert_cmpstr(str, ==, "server-certificate");
+}
+
+static void
+test_tofu_certificate_minimal(void)
+{
+    nm_auto_free_wifi_tofu NMWifiTofu *tofu        = nm_wifi_tofu_new(NULL);
+    gs_unref_variant GVariant         *server      = NULL;
+    gs_unref_variant GVariant         *certificate = NULL;
+    gs_unref_variant GVariant         *cas         = NULL;
+    gboolean                           changed;
+
+    /* a self-signed server certificate without SAN */
+    server = _cert_info(0, "/O=Example", "hello", NULL);
+    g_assert(nm_wifi_tofu_add_certificate(tofu, server));
+
+    certificate = g_variant_ref_sink(nm_wifi_tofu_get_certificate(tofu, NULL, FALSE));
+    g_assert(g_variant_lookup(certificate, "fingerprint", "&s", NULL));
+    g_assert(g_variant_lookup(certificate, "certificate", "ay", NULL));
+    cas = g_variant_lookup_value(certificate, "ca-certificates", G_VARIANT_TYPE("aay"));
+    g_assert_cmpint(g_variant_n_children(cas), ==, 0);
+    g_assert(!g_variant_lookup(certificate, "altsubject", "as", NULL));
+    g_assert(!g_variant_lookup(certificate, "ssid", "ay", NULL));
+    g_assert(g_variant_lookup(certificate, "changed", "b", &changed));
+    g_assert(!changed);
+}
+
+static void
+test_tofu_certificate_invalid(void)
+{
+    nm_auto_free_wifi_tofu NMWifiTofu *tofu = nm_wifi_tofu_new(NULL);
+    GVariantBuilder                    builder;
+    gs_unref_variant GVariant         *info = NULL;
+
+    /* wrongly typed values are ignored, without warnings */
+    g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT);
+    g_variant_builder_add(&builder, "{sv}", "depth", g_variant_new_string("0"));
+    g_variant_builder_add(&builder, "{sv}", "cert", g_variant_new_string("hello"));
+    info = g_variant_ref_sink(g_variant_builder_end(&builder));
+    g_assert(!nm_wifi_tofu_add_certificate(tofu, info));
+    g_clear_pointer(&info, g_variant_unref);
+
+    g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT);
+    g_variant_builder_add(&builder, "{sv}", "depth", g_variant_new_uint32(100));
+    g_variant_builder_add(&builder, "{sv}", "cert", nm_g_bytes_to_variant_ay(NULL));
+    info = g_variant_ref_sink(g_variant_builder_end(&builder));
+    g_assert(!nm_wifi_tofu_add_certificate(tofu, info));
+
+    g_assert(!nm_wifi_tofu_has_server_cert(tofu));
+}
+
+#define TOFU_CERT_DIR NM_BUILD_SRCDIR "/src/libnm-core-impl/tests/certs/"
+
+static GBytes *
+_load_cert(const char *file)
+{
+    gs_unref_ptrarray GPtrArray *certs = nm_crypto_load_x509_certificates(file);
+
+    g_assert_cmpint(certs->len, ==, 1);
+    return g_bytes_ref(certs->pdata[0]);
+}
+
+#define SUBJECT "/O=Example Org/CN=radius.example.com"
+
+static NMWifiTofu *
+_tofu_with_chain(const char *system_ca_path,
+                 gboolean    send_root,
+                 const char *subject,
+                 gboolean    with_dns_name)
+{
+    NMWifiTofu                *tofu   = nm_wifi_tofu_new(system_ca_path);
+    gs_unref_bytes GBytes     *server = _load_cert(TOFU_CERT_DIR "test-tofu-server.pem");
+    gs_unref_bytes GBytes     *root   = _load_cert(TOFU_CERT_DIR "test-tofu-root-ca.pem");
+    gs_unref_variant GVariant *info0  = NULL;
+    gs_unref_variant GVariant *info1  = NULL;
+    const char *const          alt[]  = {"DNS:radius.example.com", NULL};
+
+    if (send_root) {
+        info1 = _cert_info_bytes(1, "/O=Example Org/CN=Example Root CA", root, NULL);
+        g_assert(!nm_wifi_tofu_add_certificate(tofu, info1));
+    }
+    info0 = _cert_info_bytes(0, subject, server, with_dns_name ? alt : NULL);
+    g_assert(nm_wifi_tofu_add_certificate(tofu, info0));
+    return tofu;
+}
+
+static void
+test_tofu_trust_anchor(void)
+{
+    gs_unref_object NMSetting8021x *s_8021x = NM_SETTING_802_1X(nm_setting_802_1x_new());
+    gs_unref_bytes GBytes          *root    = _load_cert(TOFU_CERT_DIR "test-tofu-root-ca.pem");
+    gs_unref_bytes GBytes          *ca_cert = NULL;
+    NMWifiTofu                     *tofu;
+
+    nm_setting_802_1x_add_eap_method(s_8021x, "peap");
+    g_object_set(s_8021x,
+                 NM_SETTING_802_1X_IDENTITY,
+                 "bob",
+                 NM_SETTING_802_1X_PHASE2_AUTH,
+                 "mschapv2",
+                 NM_SETTING_802_1X_TRUST_ON_FIRST_USE,
+                 TRUE,
+                 NULL);
+
+    /* the system trusts the CA of the server: only that CA is trusted */
+    tofu = _tofu_with_chain(TOFU_CERT_DIR "test-tofu-root-ca.pem", FALSE, SUBJECT, TRUE);
+    g_assert_cmpint(nm_wifi_tofu_get_trust_anchor(tofu), ==, NM_WIFI_TOFU_TRUST_ANCHOR_SYSTEM_CA);
+    nm_wifi_tofu_set_trust_anchor(tofu, s_8021x);
+    g_object_get(s_8021x, NM_SETTING_802_1X_CA_CERT, &ca_cert, NULL);
+    g_assert(g_bytes_equal(ca_cert, root));
+    g_clear_pointer(&ca_cert, g_bytes_unref);
+    g_assert(!nm_setting_802_1x_get_system_ca_certs(s_8021x));
+    g_assert_cmpstr(nm_setting_802_1x_get_domain_match(s_8021x), ==, "radius.example.com");
+    g_assert_cmpstr(nm_setting_802_1x_get_server_cert_hash(s_8021x), ==, NULL);
+    nmtst_assert_setting_verifies(NM_SETTING(s_8021x));
+    nm_wifi_tofu_free(tofu);
+
+    /* the server sent its own root CA, which the system does not trust */
+    tofu = _tofu_with_chain(TOFU_CERT_DIR "test-tofu-other-ca.pem", TRUE, SUBJECT, TRUE);
+    g_assert_cmpint(nm_wifi_tofu_get_trust_anchor(tofu), ==, NM_WIFI_TOFU_TRUST_ANCHOR_ROOT_CA);
+    nm_wifi_tofu_set_trust_anchor(tofu, s_8021x);
+    g_object_get(s_8021x, NM_SETTING_802_1X_CA_CERT, &ca_cert, NULL);
+    g_assert(g_bytes_equal(ca_cert, root));
+    g_clear_pointer(&ca_cert, g_bytes_unref);
+    g_assert(!nm_setting_802_1x_get_system_ca_certs(s_8021x));
+    g_assert_cmpstr(nm_setting_802_1x_get_domain_match(s_8021x), ==, "radius.example.com");
+    g_assert_cmpstr(nm_setting_802_1x_get_server_cert_hash(s_8021x), ==, NULL);
+    nmtst_assert_setting_verifies(NM_SETTING(s_8021x));
+    nm_wifi_tofu_free(tofu);
+
+    /* no CA to rely on: the server certificate itself, replacing the CA and a
+     * CA path */
+    g_object_set(s_8021x, NM_SETTING_802_1X_CA_PATH, "/etc/ssl/certs", NULL);
+    tofu = _tofu_with_chain(TOFU_CERT_DIR "test-tofu-other-ca.pem", FALSE, SUBJECT, TRUE);
+    g_assert_cmpint(nm_wifi_tofu_get_trust_anchor(tofu), ==, NM_WIFI_TOFU_TRUST_ANCHOR_SERVER_CERT);
+    nm_wifi_tofu_set_trust_anchor(tofu, s_8021x);
+    g_assert_cmpint(nm_setting_802_1x_get_ca_cert_scheme(s_8021x),
+                    ==,
+                    NM_SETTING_802_1X_CK_SCHEME_UNKNOWN);
+    g_assert_cmpstr(nm_setting_802_1x_get_ca_path(s_8021x), ==, NULL);
+    g_assert(!nm_setting_802_1x_get_system_ca_certs(s_8021x));
+    g_assert_cmpstr(nm_setting_802_1x_get_domain_match(s_8021x), ==, NULL);
+    g_assert(nm_setting_802_1x_get_server_cert_hash(s_8021x));
+    nmtst_assert_setting_verifies(NM_SETTING(s_8021x));
+    nm_wifi_tofu_free(tofu);
+
+    /* without a DNS name, the common name is the server name, like for the
+     * domain-match of wpa_supplicant */
+    tofu = _tofu_with_chain(TOFU_CERT_DIR "test-tofu-other-ca.pem", TRUE, SUBJECT, FALSE);
+    g_assert_cmpint(nm_wifi_tofu_get_trust_anchor(tofu), ==, NM_WIFI_TOFU_TRUST_ANCHOR_ROOT_CA);
+    nm_wifi_tofu_set_trust_anchor(tofu, s_8021x);
+    g_assert_cmpstr(nm_setting_802_1x_get_domain_match(s_8021x), ==, "radius.example.com");
+    nm_wifi_tofu_free(tofu);
+
+    /* without a server name, a CA would trust any of its certificates */
+    tofu = _tofu_with_chain(TOFU_CERT_DIR "test-tofu-root-ca.pem", TRUE, "/O=Example Org", FALSE);
+    g_assert_cmpint(nm_wifi_tofu_get_trust_anchor(tofu), ==, NM_WIFI_TOFU_TRUST_ANCHOR_SERVER_CERT);
+    nm_wifi_tofu_free(tofu);
+
+    /* not a host name */
+    tofu = _tofu_with_chain(TOFU_CERT_DIR "test-tofu-root-ca.pem",
+                            TRUE,
+                            "/O=Example Org/CN=Example RADIUS server",
+                            FALSE);
+    g_assert_cmpint(nm_wifi_tofu_get_trust_anchor(tofu), ==, NM_WIFI_TOFU_TRUST_ANCHOR_SERVER_CERT);
+    nm_wifi_tofu_free(tofu);
+}
+
 NMTST_DEFINE();
 
 int
@@ -1568,6 +1826,11 @@ main(int argc, char **argv)
     nmtst_init_assert_logging(&argc, &argv, "INFO", "DEFAULT");
 
     g_test_add_func("/wifi/lock_bssid", test_lock_bssid);
+
+    g_test_add_func("/wifi/tofu/certificate", test_tofu_certificate);
+    g_test_add_func("/wifi/tofu/certificate_minimal", test_tofu_certificate_minimal);
+    g_test_add_func("/wifi/tofu/certificate_invalid", test_tofu_certificate_invalid);
+    g_test_add_func("/wifi/tofu/trust_anchor", test_tofu_trust_anchor);
 
     /* Open AP tests; make sure that connections to be completed that have
      * various security-related settings already set cause the completion
