@@ -89,6 +89,7 @@ typedef enum {
 #define NM_SUPPLICANT_INTERFACE_FIND_STOPPED    "find-stopped"
 #define NM_SUPPLICANT_INTERFACE_PSK_MISMATCH    "wpa-psk-mismatch"
 #define NM_SUPPLICANT_INTERFACE_SAE_MISMATCH    "wpa-sae-password-mismatch"
+#define NM_SUPPLICANT_INTERFACE_CERTIFICATION   "certification"
 
 typedef struct _NMSupplicantInterfaceClass NMSupplicantInterfaceClass;
 
