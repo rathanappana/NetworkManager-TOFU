@@ -5940,6 +5940,76 @@ test_setting_802_1x_changed_signal(void)
     "EE:FF"
 
 static void
+test_setting_802_1x_trust_on_first_use(void)
+{
+    gs_unref_object NMConnection *con   = NULL;
+    gs_unref_object NMConnection *con2  = NULL;
+    gs_unref_variant GVariant    *dict  = NULL;
+    gs_free_error GError         *error = NULL;
+    NMSetting8021x               *s_8021x;
+
+    con     = nmtst_create_minimal_connection("test", NULL, NM_SETTING_WIRED_SETTING_NAME, NULL);
+    s_8021x = NM_SETTING_802_1X(nm_setting_802_1x_new());
+    nm_setting_802_1x_add_eap_method(s_8021x, "peap");
+    g_object_set(s_8021x,
+                 NM_SETTING_802_1X_IDENTITY,
+                 "bob",
+                 NM_SETTING_802_1X_PHASE2_AUTH,
+                 "mschapv2",
+                 NULL);
+    nm_connection_add_setting(con, NM_SETTING(s_8021x));
+
+    g_assert(!nm_setting_802_1x_get_trust_on_first_use(s_8021x));
+    g_assert(!_nm_setting_802_1x_needs_trust_on_first_use(s_8021x));
+
+    g_object_set(s_8021x, NM_SETTING_802_1X_TRUST_ON_FIRST_USE, TRUE, NULL);
+    nmtst_assert_setting_verifies(NM_SETTING(s_8021x));
+    g_assert(_nm_setting_802_1x_needs_trust_on_first_use(s_8021x));
+
+    /* any other way to verify the server makes it unnecessary */
+    g_object_set(s_8021x, NM_SETTING_802_1X_SERVER_CERT_HASH, SHA256_HEX_64_COLON, NULL);
+    g_assert(!_nm_setting_802_1x_needs_trust_on_first_use(s_8021x));
+    g_object_set(s_8021x, NM_SETTING_802_1X_SERVER_CERT_HASH, NULL, NULL);
+    g_object_set(s_8021x, NM_SETTING_802_1X_SYSTEM_CA_CERTS, TRUE, NULL);
+    g_assert(!_nm_setting_802_1x_needs_trust_on_first_use(s_8021x));
+    g_object_set(s_8021x, NM_SETTING_802_1X_SYSTEM_CA_CERTS, FALSE, NULL);
+    g_object_set(s_8021x, NM_SETTING_802_1X_CA_PATH, "/etc/ssl/certs", NULL);
+    nmtst_assert_setting_verifies(NM_SETTING(s_8021x));
+    g_assert(!_nm_setting_802_1x_needs_trust_on_first_use(s_8021x));
+    g_object_set(s_8021x, NM_SETTING_802_1X_CA_PATH, NULL, NULL);
+    g_assert(_nm_setting_802_1x_needs_trust_on_first_use(s_8021x));
+
+    /* a server could pick an EAP method without a certificate */
+    nm_setting_802_1x_add_eap_method(s_8021x, "md5");
+    nmtst_assert_setting_verify_fails(NM_SETTING(s_8021x),
+                                      NM_CONNECTION_ERROR,
+                                      NM_CONNECTION_ERROR_INVALID_PROPERTY);
+    nm_setting_802_1x_remove_eap_method(s_8021x, 1);
+    nmtst_assert_setting_verifies(NM_SETTING(s_8021x));
+
+    /* methods with a server certificate can be combined */
+    nm_setting_802_1x_add_eap_method(s_8021x, "ttls");
+    nmtst_assert_setting_verifies(NM_SETTING(s_8021x));
+    nm_setting_802_1x_remove_eap_method(s_8021x, 1);
+
+    /* a CA certificate makes it unnecessary too */
+    g_assert(nm_setting_802_1x_set_ca_cert(s_8021x,
+                                           NM_BUILD_SRCDIR
+                                           "/src/libnm-core-impl/tests/certs/test-ca-cert.pem",
+                                           NM_SETTING_802_1X_CK_SCHEME_PATH,
+                                           NULL,
+                                           NULL));
+    g_assert(!_nm_setting_802_1x_needs_trust_on_first_use(s_8021x));
+    nm_setting_802_1x_set_ca_cert(s_8021x, NULL, NM_SETTING_802_1X_CK_SCHEME_PATH, NULL, NULL);
+    g_assert(_nm_setting_802_1x_needs_trust_on_first_use(s_8021x));
+
+    dict = nm_connection_to_dbus(con, NM_CONNECTION_SERIALIZE_ALL);
+    con2 = _connection_new_from_dbus(dict, &error);
+    g_assert_no_error(error);
+    g_assert(nm_setting_802_1x_get_trust_on_first_use(nm_connection_get_setting_802_1x(con2)));
+}
+
+static void
 test_setting_802_1x_server_cert_hash(void)
 {
     gs_unref_object NMSetting8021x *s_8021x = NULL;
@@ -12594,6 +12664,8 @@ main(int argc, char **argv)
                     test_setting_802_1x_changed_signal);
     g_test_add_func("/core/general/test_setting_802_1x_server_cert_hash",
                     test_setting_802_1x_server_cert_hash);
+    g_test_add_func("/core/general/test_setting_802_1x_trust_on_first_use",
+                    test_setting_802_1x_trust_on_first_use);
     g_test_add_func("/core/general/test_setting_ip4_gateway", test_setting_ip4_gateway);
     g_test_add_func("/core/general/test_setting_ip6_gateway", test_setting_ip6_gateway);
     g_test_add_func("/core/general/test_setting_compare_default_strv",

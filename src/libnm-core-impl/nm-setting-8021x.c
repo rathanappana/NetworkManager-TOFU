@@ -94,6 +94,7 @@ NM_GOBJECT_PROPERTIES_DEFINE(NMSetting8021x,
                              PROP_CA_CERT_PASSWORD_FLAGS,
                              PROP_CA_PATH,
                              PROP_SERVER_CERT_HASH,
+                             PROP_TRUST_ON_FIRST_USE,
                              PROP_SUBJECT_MATCH,
                              PROP_ALTSUBJECT_MATCHES,
                              PROP_DOMAIN_SUFFIX_MATCH,
@@ -185,6 +186,7 @@ typedef struct {
     gint32  auth_timeout;
     bool    optional;
     bool    system_ca_certs;
+    bool    trust_on_first_use;
 } NMSetting8021xPrivate;
 
 /**
@@ -945,6 +947,44 @@ nm_setting_802_1x_get_server_cert_hash(NMSetting8021x *setting)
     g_return_val_if_fail(NM_IS_SETTING_802_1X(setting), NULL);
 
     return NM_SETTING_802_1X_GET_PRIVATE(setting)->server_cert_hash;
+}
+
+/**
+ * nm_setting_802_1x_get_trust_on_first_use:
+ * @setting: the #NMSetting8021x
+ *
+ * Returns: the #NMSetting8021x:trust-on-first-use property of the setting.
+ *
+ * Since: 1.60
+ **/
+gboolean
+nm_setting_802_1x_get_trust_on_first_use(NMSetting8021x *setting)
+{
+    g_return_val_if_fail(NM_IS_SETTING_802_1X(setting), FALSE);
+
+    return NM_SETTING_802_1X_GET_PRIVATE(setting)->trust_on_first_use;
+}
+
+/**
+ * _nm_setting_802_1x_needs_trust_on_first_use:
+ * @setting: (nullable): the #NMSetting8021x
+ *
+ * Returns: %TRUE if @setting enables trust on first use and has no way yet to
+ *   verify the server certificate. Such a setting must not be used to
+ *   authenticate until the certificate is pinned in
+ *   #NMSetting8021x:server-cert-hash.
+ */
+gboolean
+_nm_setting_802_1x_needs_trust_on_first_use(NMSetting8021x *setting)
+{
+    NMSetting8021xPrivate *priv;
+
+    if (!setting)
+        return FALSE;
+
+    priv = NM_SETTING_802_1X_GET_PRIVATE(setting);
+    return priv->trust_on_first_use && !priv->ca_cert && !priv->ca_path && !priv->system_ca_certs
+           && !priv->server_cert_hash;
 }
 
 /**
@@ -3110,6 +3150,26 @@ verify(NMSetting *setting, NMConnection *connection, GError **error)
         return FALSE;
     }
 
+    if (priv->trust_on_first_use) {
+        for (iter = priv->eap; iter; iter = iter->next) {
+            if (!NM_IN_STRSET(iter->data, "tls", "ttls", "peap")) {
+                /* Pinning the server certificate would not protect against a
+                 * server that picks a method without one. */
+                g_set_error(error,
+                            NM_CONNECTION_ERROR,
+                            NM_CONNECTION_ERROR_INVALID_PROPERTY,
+                            _("can only be used with the \"tls\", \"ttls\" and \"peap\" EAP "
+                              "methods, not with \"%s\""),
+                            (const char *) iter->data);
+                g_prefix_error(error,
+                               "%s.%s: ",
+                               NM_SETTING_802_1X_SETTING_NAME,
+                               NM_SETTING_802_1X_TRUST_ON_FIRST_USE);
+                return FALSE;
+            }
+        }
+    }
+
     if (!_cert_verify_property(priv->ca_cert,
                                NM_SETTING_802_1X_CA_CERT,
                                priv->ca_cert_password,
@@ -3595,6 +3655,50 @@ nm_setting_802_1x_class_init(NMSetting8021xClass *klass)
                                               .direct_data.set_string =
                                                   _set_string_fcn_server_cert_hash,
                                               .direct_string_allow_empty = TRUE);
+
+    /**
+     * NMSetting8021x:trust-on-first-use:
+     *
+     * Whether to trust the certificate of the authentication server on first
+     * use (TOFU).
+     *
+     * With trust on first use, the properties that verify the server
+     * (#NMSetting8021x:ca-cert, #NMSetting8021x:ca-path,
+     * #NMSetting8021x:system-ca-certs, #NMSetting8021x:server-cert-hash and
+     * #NMSetting8021x:domain-match) hold the trust that the user confirmed.
+     * NetworkManager sets them, and replaces them when the user trusts a
+     * changed certificate.
+     *
+     * As long as none of the first four is set, NetworkManager first
+     * retrieves the certificates of the server without sending any
+     * credentials, and asks a secret agent to let the user confirm the server
+     * certificate. If the user trusts it, NetworkManager stores how to verify
+     * the server from then on: if the certificates verify against the CA
+     * certificates of the system, it enables #NMSetting8021x:system-ca-certs;
+     * if the server sent its root CA certificate, it stores that in
+     * #NMSetting8021x:ca-cert. In both cases, #NMSetting8021x:domain-match is
+     * set to the name of the server, so that it can renew its certificate.
+     * Otherwise, the fingerprint of the server certificate is stored in
+     * #NMSetting8021x:server-cert-hash.
+     *
+     * If the server is rejected later, for example because it changed its
+     * certificate, the user is asked whether to trust the new certificate.
+     *
+     * Only the "tls", "ttls" and "peap" EAP methods are allowed, as only they
+     * authenticate the server with a certificate. This is supported for Wi-Fi
+     * connections using wpa_supplicant. Other connections that would need it
+     * fail to activate instead of not verifying the server.
+     *
+     * Since: 1.60
+     **/
+    _nm_setting_property_define_direct_boolean(properties_override,
+                                               obj_properties,
+                                               NM_SETTING_802_1X_TRUST_ON_FIRST_USE,
+                                               PROP_TRUST_ON_FIRST_USE,
+                                               FALSE,
+                                               NM_SETTING_PARAM_NONE,
+                                               NMSetting8021xPrivate,
+                                               trust_on_first_use);
 
     /**
      * NMSetting8021x:subject-match:
