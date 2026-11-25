@@ -1562,6 +1562,44 @@ test_ap_check_compatible_band(void)
 
 /*****************************************************************************/
 
+static void
+test_tofu_iwd_unsupported(void)
+{
+    gs_unref_object NMConnection   *connection = NULL;
+    gs_free_error GError           *error      = NULL;
+    gs_free char                   *filename   = NULL;
+    nm_auto_unref_keyfile GKeyFile *file       = NULL;
+
+    connection =
+        nmtst_create_minimal_connection("tofu", NULL, NM_SETTING_WIRELESS_SETTING_NAME, NULL);
+    nm_connection_add_setting(connection, nm_setting_802_1x_new());
+    nm_setting_802_1x_add_eap_method(nm_connection_get_setting_802_1x(connection), "peap");
+    g_object_set(nm_connection_get_setting_wireless(connection),
+                 NM_SETTING_WIRELESS_SSID,
+                 nmtst_gbytes_from_str("eduroam"),
+                 NULL);
+    nm_connection_add_setting(connection,
+                              g_object_new(NM_TYPE_SETTING_WIRELESS_SECURITY,
+                                           NM_SETTING_WIRELESS_SECURITY_KEY_MGMT,
+                                           "wpa-eap",
+                                           NULL));
+    g_object_set(nm_connection_get_setting_802_1x(connection),
+                 NM_SETTING_802_1X_TRUST_ON_FIRST_USE,
+                 TRUE,
+                 NM_SETTING_802_1X_IDENTITY,
+                 "bob",
+                 NM_SETTING_802_1X_ANONYMOUS_IDENTITY,
+                 "anonymous",
+                 NM_SETTING_802_1X_PHASE2_AUTH,
+                 "mschapv2",
+                 NULL);
+
+    file = nm_wifi_utils_connection_to_iwd_config(connection, &filename, &error);
+    g_assert_error(error, NM_CONNECTION_ERROR, NM_CONNECTION_ERROR_INVALID_PROPERTY);
+    g_assert(strstr(error->message, "Trust on first use"));
+    g_assert(!file);
+}
+
 static GVariant *
 _cert_info_bytes(guint32 depth, const char *subject, GBytes *cert, const char *const *altsubject)
 {
@@ -1809,6 +1847,7 @@ main(int argc, char **argv)
     g_test_add_func("/wifi/tofu/certificate_minimal", test_tofu_certificate_minimal);
     g_test_add_func("/wifi/tofu/certificate_invalid", test_tofu_certificate_invalid);
     g_test_add_func("/wifi/tofu/trust_anchor", test_tofu_trust_anchor);
+    g_test_add_func("/wifi/tofu/iwd_unsupported", test_tofu_iwd_unsupported);
 
     /* Open AP tests; make sure that connections to be completed that have
      * various security-related settings already set cause the completion

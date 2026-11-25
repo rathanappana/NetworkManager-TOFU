@@ -1097,6 +1097,18 @@ eap_certs_to_iwd_config(GKeyFile       *file,
         return FALSE;
     }
 
+    if (!phase2 && _nm_setting_802_1x_needs_trust_on_first_use(s_8021x)) {
+        /* IWD cannot retrieve the server certificate without verifying it,
+         * so trust on first use cannot be offered. Connecting without
+         * verifying the server would be the opposite of what was asked. */
+        g_set_error_literal(error,
+                            NM_CONNECTION_ERROR,
+                            NM_CONNECTION_ERROR_INVALID_PROPERTY,
+                            "Trust on first use of the server certificate is not supported "
+                            "with iwd");
+        return FALSE;
+    }
+
     if (nm_setting_802_1x_get_system_ca_certs(s_8021x)) {
         /* Either overrides or is added to the certificates in (phase2-)ca-cert
          * and ca-path depending on whether it points to a file or a directory.
