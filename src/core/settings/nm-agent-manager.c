@@ -1541,6 +1541,52 @@ nm_agent_manager_all_agents_have_capability(NMAgentManager           *manager,
     return TRUE;
 }
 
+/**
+ * nm_agent_manager_get_certificate_agent:
+ * @self: the #NMAgentManager
+ * @connection: the connection whose server certificate is to be confirmed
+ * @subject: the subject that requested the activation
+ *
+ * Finds an agent that can confirm a server certificate for @connection. The
+ * agent must have the %NM_SECRET_AGENT_CAPABILITY_TRUST_ON_FIRST_USE capability, its
+ * user must be allowed to see @connection and, if @subject is a process, it
+ * must belong to the same user. These are the rules used for secret requests.
+ * Like for those, agents of users in an active session are preferred.
+ *
+ * Returns: (transfer none): the agent or %NULL.
+ */
+NMSecretAgent *
+nm_agent_manager_get_certificate_agent(NMAgentManager *self,
+                                       NMConnection   *connection,
+                                       NMAuthSubject  *subject)
+{
+    NMAgentManagerPrivate *priv     = NM_AGENT_MANAGER_GET_PRIVATE(self);
+    NMSecretAgent         *fallback = NULL;
+    NMSecretAgent         *agent;
+
+    c_list_for_each_entry (agent, &priv->agent_lst_head, agent_lst) {
+        if (!agent->fully_registered)
+            continue;
+        if (!NM_FLAGS_HAS(nm_secret_agent_get_capabilities(agent),
+                          NM_SECRET_AGENT_CAPABILITY_TRUST_ON_FIRST_USE))
+            continue;
+        if (!nm_auth_is_subject_in_acl(connection, nm_secret_agent_get_subject(agent), NULL))
+            continue;
+        if (nm_auth_subject_get_subject_type(subject) == NM_AUTH_SUBJECT_TYPE_UNIX_PROCESS
+            && nm_secret_agent_get_owner_uid(agent)
+                   != nm_auth_subject_get_unix_process_uid(subject))
+            continue;
+        if (nm_session_monitor_session_exists(priv->session_monitor,
+                                              nm_secret_agent_get_owner_uid(agent),
+                                              TRUE))
+            return agent;
+        if (!fallback)
+            fallback = agent;
+    }
+
+    return fallback;
+}
+
 /*****************************************************************************/
 
 static void

@@ -26,6 +26,9 @@
 #define METHOD_SAVE_SECRETS       "SaveSecrets"
 #define METHOD_DELETE_SECRETS     "DeleteSecrets"
 
+#define METHOD_CONFIRM_SERVER_CERT        "ConfirmServerCertificate"
+#define METHOD_CANCEL_CONFIRM_SERVER_CERT "CancelConfirmServerCertificate"
+
 enum {
     DISCONNECTED,
 
@@ -207,8 +210,11 @@ _call_id_invoke_callback(NMSecretAgentCallId *call_id,
         nm_assert(!secrets);
         _LOG2T(call_id, "completed with failure: %s", error->message);
     } else {
-        nm_assert(!secrets || g_variant_is_of_type(secrets, G_VARIANT_TYPE("a{sa{sv}}")));
-        nm_assert((!!secrets) == nm_streq0(call_id->method_name, METHOD_GET_SECRETS));
+        nm_assert(!secrets || g_variant_is_of_type(secrets, G_VARIANT_TYPE("a{sa{sv}}"))
+                  || g_variant_is_of_type(secrets, G_VARIANT_TYPE("(b)")));
+        nm_assert(
+            (!!secrets)
+            == NM_IN_STRSET(call_id->method_name, METHOD_GET_SECRETS, METHOD_CONFIRM_SERVER_CERT));
         _LOG2T(call_id, "completed successfully");
     }
 
@@ -387,10 +393,30 @@ _dbus_call_cb(GObject *source, GAsyncResult *result, gpointer user_data)
                                 "the agent cancelled the request");
         } else
             g_dbus_error_strip_remote_error(error);
-    } else {
-        if (nm_streq(call_id->method_name, METHOD_GET_SECRETS)) {
-            g_variant_get(ret, "(@a{sa{sv}})", &secrets);
+
+        if (nm_streq(call_id->method_name, METHOD_CONFIRM_SERVER_CERT)
+            && g_error_matches(error, G_IO_ERROR, G_IO_ERROR_TIMED_OUT)) {
+            NMSecretAgentPrivate *priv = NM_SECRET_AGENT_GET_PRIVATE(call_id->self);
+
+            /* Let the agent close its dialog. */
+            g_dbus_connection_call(priv->dbus_connection,
+                                   priv->dbus_owner,
+                                   NM_DBUS_PATH_CERTIFICATE_AGENT,
+                                   NM_DBUS_INTERFACE_CERTIFICATE_AGENT,
+                                   METHOD_CANCEL_CONFIRM_SERVER_CERT,
+                                   g_variant_new("(o)", call_id->path),
+                                   G_VARIANT_TYPE("()"),
+                                   G_DBUS_CALL_FLAGS_NO_AUTO_START,
+                                   NM_SHUTDOWN_TIMEOUT_1500_MSEC,
+                                   NULL,
+                                   NULL,
+                                   NULL);
         }
+    } else {
+        if (nm_streq(call_id->method_name, METHOD_GET_SECRETS))
+            g_variant_get(ret, "(@a{sa{sv}})", &secrets);
+        else if (nm_streq(call_id->method_name, METHOD_CONFIRM_SERVER_CERT))
+            secrets = g_steal_pointer(&ret);
     }
 
     _call_id_invoke_callback(call_id, secrets, error, FALSE, TRUE);
@@ -461,11 +487,13 @@ _call_cancel_cb(GObject *source, GAsyncResult *result, gpointer user_data)
     ret = g_dbus_connection_call_finish(G_DBUS_CONNECTION(source), result, &error);
 
     if (ret)
-        _LOG2T(call_id, "success cancelling GetSecrets");
+        _LOG2T(call_id, "success cancelling %s", call_id->method_name);
     else if (g_error_matches(error, G_DBUS_ERROR, G_DBUS_ERROR_SERVICE_UNKNOWN))
-        _LOG2T(call_id, "cancelling GetSecrets no longer works as service disconnected");
+        _LOG2T(call_id,
+               "cancelling %s no longer works as service disconnected",
+               call_id->method_name);
     else {
-        _LOG2T(call_id, "failed to cancel GetSecrets: %s", error->message);
+        _LOG2T(call_id, "failed to cancel %s: %s", call_id->method_name, error->message);
     }
 
     _call_id_free(call_id);
@@ -513,14 +541,18 @@ nm_secret_agent_cancel_call(NMSecretAgent *self, NMSecretAgentCallId *call_id)
 
     nm_clear_g_cancellable(&call_id->cancellable);
 
-    if (nm_streq(call_id->method_name, METHOD_GET_SECRETS)) {
+    if (NM_IN_STRSET(call_id->method_name, METHOD_GET_SECRETS, METHOD_CONFIRM_SERVER_CERT)) {
+        gboolean get_secrets = nm_streq(call_id->method_name, METHOD_GET_SECRETS);
+
+        /* Let the agent close its dialog. */
         g_dbus_connection_call(
             priv->dbus_connection,
             priv->dbus_owner,
-            NM_DBUS_PATH_SECRET_AGENT,
-            NM_DBUS_INTERFACE_SECRET_AGENT,
-            METHOD_CANCEL_GET_SECRETS,
-            g_variant_new("(os)", call_id->path, call_id->setting_name),
+            get_secrets ? NM_DBUS_PATH_SECRET_AGENT : NM_DBUS_PATH_CERTIFICATE_AGENT,
+            get_secrets ? NM_DBUS_INTERFACE_SECRET_AGENT : NM_DBUS_INTERFACE_CERTIFICATE_AGENT,
+            get_secrets ? METHOD_CANCEL_GET_SECRETS : METHOD_CANCEL_CONFIRM_SERVER_CERT,
+            get_secrets ? g_variant_new("(os)", call_id->path, call_id->setting_name)
+                        : g_variant_new("(o)", call_id->path),
             G_VARIANT_TYPE("()"),
             G_DBUS_CALL_FLAGS_NO_AUTO_START,
             NM_SHUTDOWN_TIMEOUT_1500_MSEC,
@@ -611,6 +643,56 @@ nm_secret_agent_delete_secrets(NMSecretAgent        *self,
                            call_id->cancellable,
                            _dbus_call_cb,
                            call_id);
+    return call_id;
+}
+
+/*****************************************************************************/
+
+/**
+ * nm_secret_agent_confirm_server_cert:
+ * @self: the #NMSecretAgent, which must have the
+ *   %NM_SECRET_AGENT_CAPABILITY_TRUST_ON_FIRST_USE capability.
+ * @path: the D-Bus path of the connection.
+ * @certificate: the floating a{sv} description of the server certificate.
+ * @callback: invoked with the "(b)" reply of the agent.
+ * @callback_data: user data for @callback.
+ *
+ * Asks the agent to let the user trust a server certificate.
+ *
+ * Returns: the call id, to be cancelled with nm_secret_agent_cancel_call().
+ */
+NMSecretAgentCallId *
+nm_secret_agent_confirm_server_cert(NMSecretAgent        *self,
+                                    const char           *path,
+                                    GVariant             *certificate,
+                                    NMSecretAgentCallback callback,
+                                    gpointer              callback_data)
+{
+    NMSecretAgentPrivate *priv;
+    NMSecretAgentCallId  *call_id;
+
+    g_return_val_if_fail(NM_IS_SECRET_AGENT(self), NULL);
+    g_return_val_if_fail(path && *path, NULL);
+    g_return_val_if_fail(g_variant_is_of_type(certificate, G_VARIANT_TYPE_VARDICT), NULL);
+    g_return_val_if_fail(callback, NULL);
+
+    priv = NM_SECRET_AGENT_GET_PRIVATE(self);
+
+    call_id = _call_id_new(self, METHOD_CONFIRM_SERVER_CERT, path, NULL, callback, callback_data);
+
+    g_dbus_connection_call(priv->dbus_connection,
+                           priv->dbus_owner,
+                           NM_DBUS_PATH_CERTIFICATE_AGENT,
+                           NM_DBUS_INTERFACE_CERTIFICATE_AGENT,
+                           call_id->method_name,
+                           g_variant_new("(o@a{sv})", path, certificate),
+                           G_VARIANT_TYPE("(b)"),
+                           G_DBUS_CALL_FLAGS_NO_AUTO_START,
+                           120000,
+                           call_id->cancellable,
+                           _dbus_call_cb,
+                           call_id);
+
     return call_id;
 }
 
