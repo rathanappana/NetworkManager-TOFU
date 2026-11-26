@@ -165,6 +165,40 @@ cert_writer(NMConnection                     *connection,
     }
 }
 
+/**
+ * nms_keyfile_writer_remove_ca_cert_file:
+ * @keyfile_dir: the directory of the keyfile
+ * @uuid: the UUID of the profile
+ * @keyfile: (nullable): the keyfile of the profile
+ *
+ * Trust on first use stores the root CA certificate of the server as DER
+ * data, which is written to "<uuid>-ca-cert.der" next to the keyfile.
+ * Removes that file, unless @keyfile still uses it.
+ */
+void
+nms_keyfile_writer_remove_ca_cert_file(const char *keyfile_dir, const char *uuid, GKeyFile *keyfile)
+{
+    gs_free char *name = g_strdup_printf("%s-ca-cert.der", uuid);
+    gs_free char *path = NULL;
+
+    if (keyfile) {
+        gs_free char *value = NULL;
+        gs_free char *used  = NULL;
+
+        value = nm_keyfile_plugin_kf_get_string(keyfile,
+                                                NM_SETTING_802_1X_SETTING_NAME,
+                                                NM_SETTING_802_1X_CA_CERT,
+                                                NULL);
+        if (value)
+            used = g_path_get_basename(value);
+        if (nm_streq0(used, name))
+            return;
+    }
+
+    path = g_build_filename(keyfile_dir, name, NULL);
+    unlink(path);
+}
+
 static gboolean
 _handler_write(NMConnection         *connection,
                GKeyFile             *keyfile,
@@ -423,6 +457,11 @@ _internal_write_connection(NMConnection                   *connection,
      */
     if (existing_path && !existing_path_read_only && !nm_streq(path, existing_path))
         unlink(existing_path);
+
+    /* The trust stored on first use might have been replaced. */
+    nms_keyfile_writer_remove_ca_cert_file(keyfile_dir,
+                                           nm_connection_get_uuid(connection),
+                                           kf_file);
 
     NM_SET_OUT(out_reread, g_steal_pointer(&reread));
     NM_SET_OUT(out_reread_same, reread_same);

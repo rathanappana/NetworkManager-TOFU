@@ -30,6 +30,10 @@ gboolean nms_keyfile_writer_connection(NMConnection                   *connectio
                                        gboolean                       *out_reread_same,
                                        GError                        **error);
 
+void nms_keyfile_writer_remove_ca_cert_file(const char *keyfile_dir,
+                                            const char *uuid,
+                                            GKeyFile   *keyfile);
+
 gboolean nmtst_keyfile_writer_test_connection(NMConnection  *connection,
                                               const char    *keyfile_dir,
                                               uid_t          owner_uid,
