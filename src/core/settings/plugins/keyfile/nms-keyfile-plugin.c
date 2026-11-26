@@ -1078,6 +1078,11 @@ delete_connection(NMSettingsPlugin *plugin, NMSettingsStorage *storage_x, GError
           NM_PRINT_FMT_QUOTED(remove_from_disk_errmsg, ": ", remove_from_disk_errmsg, "", ""));
 
     if (success) {
+        if (!storage->is_meta_data) {
+            gs_free char *keyfile_dir = g_path_get_dirname(previous_filename);
+
+            nms_keyfile_writer_remove_ca_cert_file(keyfile_dir, uuid, NULL);
+        }
         nm_sett_util_storages_steal(&priv->storages, storage);
         nms_keyfile_storage_destroy(storage);
     }

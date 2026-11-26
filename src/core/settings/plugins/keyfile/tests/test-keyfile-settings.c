@@ -1769,6 +1769,79 @@ test_write_wired_8021x_tls_connection_path(void)
     unlink(testfile);
 }
 
+#define TEST_CA_CERT_DER NM_BUILD_SRCDIR "/src/libnm-core-impl/tests/certs/test_ca_cert.der"
+
+static void
+test_write_8021x_tofu_ca_cert_file(void)
+{
+    gs_unref_object NMConnection *connection = NULL;
+    gs_unref_object NMConnection *reread     = NULL;
+    NMSetting8021x               *s_8021x;
+    gs_free char                 *testfile    = NULL;
+    gs_free char                 *ca_cert     = NULL;
+    gs_free char                 *client_cert = NULL;
+    gs_free char                 *priv_key    = NULL;
+    const char                   *uuid;
+    gboolean                      reread_same = FALSE;
+    gboolean                      success;
+    gs_free_error GError         *error = NULL;
+
+    /* Trust on first use stores the root CA as DER data. */
+    connection = create_wired_tls_connection(NM_SETTING_802_1X_CK_SCHEME_BLOB);
+    s_8021x    = nm_connection_get_setting_802_1x(connection);
+    success    = nm_setting_802_1x_set_ca_cert(s_8021x,
+                                               TEST_CA_CERT_DER,
+                                               NM_SETTING_802_1X_CK_SCHEME_BLOB,
+                                               NULL,
+                                               &error);
+    nmtst_assert_success(success, error);
+
+    uuid        = nm_connection_get_uuid(connection);
+    ca_cert     = g_strdup_printf("%s/%s-ca-cert.der", TEST_SCRATCH_DIR, uuid);
+    client_cert = g_strdup_printf("%s/%s-client-cert.pem", TEST_SCRATCH_DIR, uuid);
+    priv_key    = g_strdup_printf("%s/%s-private-key.pem", TEST_SCRATCH_DIR, uuid);
+
+    write_test_connection_reread(connection, &testfile, &reread, &reread_same);
+    g_assert(g_file_test(ca_cert, G_FILE_TEST_EXISTS));
+    g_clear_object(&reread);
+
+    /* Writing the profile again keeps the file it still uses. */
+    unlink(testfile);
+    nm_clear_g_free(&testfile);
+    write_test_connection_reread(connection, &testfile, &reread, &reread_same);
+    g_assert(g_file_test(ca_cert, G_FILE_TEST_EXISTS));
+    g_clear_object(&reread);
+
+    /* Writing it without the CA certificate removes the file. */
+    unlink(testfile);
+    nm_clear_g_free(&testfile);
+    nm_setting_802_1x_set_ca_cert(s_8021x, NULL, NM_SETTING_802_1X_CK_SCHEME_BLOB, NULL, NULL);
+    write_test_connection_reread(connection, &testfile, &reread, &reread_same);
+    g_assert(!g_file_test(ca_cert, G_FILE_TEST_EXISTS));
+    g_clear_object(&reread);
+
+    /* Deleting the profile removes it. */
+    unlink(testfile);
+    nm_clear_g_free(&testfile);
+    success = nm_setting_802_1x_set_ca_cert(s_8021x,
+                                            TEST_CA_CERT_DER,
+                                            NM_SETTING_802_1X_CK_SCHEME_BLOB,
+                                            NULL,
+                                            &error);
+    nmtst_assert_success(success, error);
+    write_test_connection_reread(connection, &testfile, &reread, &reread_same);
+    g_assert(g_file_test(ca_cert, G_FILE_TEST_EXISTS));
+    unlink(testfile);
+    nms_keyfile_writer_remove_ca_cert_file(TEST_SCRATCH_DIR, uuid, NULL);
+    g_assert(!g_file_test(ca_cert, G_FILE_TEST_EXISTS));
+
+    /* Files that trust on first use does not create are left alone. */
+    g_assert(g_file_test(client_cert, G_FILE_TEST_EXISTS));
+    g_assert(g_file_test(priv_key, G_FILE_TEST_EXISTS));
+    unlink(client_cert);
+    unlink(priv_key);
+}
+
 static void
 test_write_wired_8021x_tls_connection_blob(void)
 {
@@ -2973,6 +3046,8 @@ main(int argc, char **argv)
                     test_write_wired_8021x_tls_connection_path);
     g_test_add_func("/keyfile/test_write_wired_8021x_tls_connection_blob",
                     test_write_wired_8021x_tls_connection_blob);
+    g_test_add_func("/keyfile/test_write_8021x_tofu_ca_cert_file",
+                    test_write_8021x_tofu_ca_cert_file);
 
     g_test_add_func("/keyfile/test_read_dcb_connection", test_read_dcb_connection);
 
